@@ -51,75 +51,29 @@ impl PiiKind {
 
 struct PatternDef {
     kind: PiiKind,
-    regex: Lazy<Regex>,
+    pattern: &'static str,
 }
 
-macro_rules! pattern {
-    ($kind:expr, $re:expr) => {
-        PatternDef {
-            kind: $kind,
-            regex: Lazy::new(|| Regex::new($re).unwrap()),
-        }
-    };
-}
-
-static PATTERNS: &[PatternDef] = &[
-    // Email
-    pattern!(
-        PiiKind::Email,
-        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-    ),
-    // Phone (international and US formats)
-    pattern!(
-        PiiKind::Phone,
-        r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
-    ),
-    // Credit card (Visa, MC, Amex, Discover with optional separators)
-    pattern!(
-        PiiKind::CreditCard,
-        r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"
-    ),
-    // SSN
-    pattern!(
-        PiiKind::Ssn,
-        r"\b\d{3}-\d{2}-\d{4}\b"
-    ),
-    // IPv4
-    pattern!(
-        PiiKind::IpAddress,
-        r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
-    ),
-    // AWS Access Key
-    pattern!(
-        PiiKind::AwsKey,
-        r"\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b"
-    ),
-    // GitHub tokens
-    pattern!(
-        PiiKind::GithubToken,
-        r"\b(?:ghp|ghs|gho|ghu|ghr)_[a-zA-Z0-9]{36,}\b"
-    ),
-    // Generic API keys (common prefixes)
-    pattern!(
-        PiiKind::GenericApiKey,
-        r"\b(?:sk-[a-zA-Z0-9]{20,}|sk-proj-[a-zA-Z0-9_-]{20,}|xox[boaprs]-[a-zA-Z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})\b"
-    ),
-    // Bearer tokens
-    pattern!(
-        PiiKind::BearerToken,
-        r"(?i)Bearer\s+[a-zA-Z0-9._~+/=-]{20,}"
-    ),
-    // Connection strings (postgres, mysql, mongodb, redis)
-    pattern!(
-        PiiKind::ConnectionString,
-        r#"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s'""]+"#
-    ),
-    // Private keys
-    pattern!(
-        PiiKind::PrivateKey,
-        r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
-    ),
+static PATTERN_DEFS: &[PatternDef] = &[
+    PatternDef { kind: PiiKind::Email, pattern: r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" },
+    PatternDef { kind: PiiKind::Phone, pattern: r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}" },
+    PatternDef { kind: PiiKind::CreditCard, pattern: r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b" },
+    PatternDef { kind: PiiKind::Ssn, pattern: r"\b\d{3}-\d{2}-\d{4}\b" },
+    PatternDef { kind: PiiKind::IpAddress, pattern: r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b" },
+    PatternDef { kind: PiiKind::AwsKey, pattern: r"\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b" },
+    PatternDef { kind: PiiKind::GithubToken, pattern: r"\b(?:ghp|ghs|gho|ghu|ghr)_[a-zA-Z0-9]{36,}\b" },
+    PatternDef { kind: PiiKind::GenericApiKey, pattern: r"\b(?:sk-[a-zA-Z0-9]{20,}|sk-proj-[a-zA-Z0-9_-]{20,}|xox[boaprs]-[a-zA-Z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})\b" },
+    PatternDef { kind: PiiKind::BearerToken, pattern: r"(?i)Bearer\s+[a-zA-Z0-9._~+/=-]{20,}" },
+    PatternDef { kind: PiiKind::ConnectionString, pattern: r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://\S+" },
+    PatternDef { kind: PiiKind::PrivateKey, pattern: r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----.+?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----" },
 ];
+
+static COMPILED_PATTERNS: Lazy<Vec<(PiiKind, Regex)>> = Lazy::new(|| {
+    PATTERN_DEFS
+        .iter()
+        .map(|p| (p.kind.clone(), Regex::new(p.pattern).unwrap()))
+        .collect()
+});
 
 /// Shannon entropy of a string
 fn shannon_entropy(s: &str) -> f64 {
@@ -196,10 +150,10 @@ pub fn detect(text: &str) -> Vec<PiiEntity> {
     let mut entities = Vec::new();
 
     // Pattern-based detection
-    for pattern in PATTERNS {
-        for m in pattern.regex.find_iter(text) {
+    for (kind, regex) in COMPILED_PATTERNS.iter() {
+        for m in regex.find_iter(text) {
             entities.push(PiiEntity {
-                kind: pattern.kind.clone(),
+                kind: kind.clone(),
                 start: m.start(),
                 end: m.end(),
                 original: m.as_str().to_string(),

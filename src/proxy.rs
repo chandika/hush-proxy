@@ -181,7 +181,7 @@ async fn handle_streaming_response(
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
                     let rehydrated = state.token_map.rehydrate(&text);
-                    let frame = Frame::data(Bytes::from(rehydrated.into_owned()));
+                    let frame = Frame::data(Bytes::from(rehydrated));
                     if tx.send(Ok(frame)).await.is_err() {
                         break;
                     }
@@ -196,7 +196,7 @@ async fn handle_streaming_response(
 
     let stream = ReceiverStream::new(rx);
     let body = StreamBody::new(stream);
-    let boxed: BoxBody = body.boxed();
+    let boxed: BoxBody = BodyExt::boxed(body);
 
     let mut builder = Response::builder().status(StatusCode::from_u16(status.as_u16()).unwrap());
     for (name, value) in resp_headers.iter() {
