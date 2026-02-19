@@ -112,7 +112,7 @@ static PATTERNS: &[PatternDef] = &[
     // Connection strings (postgres, mysql, mongodb, redis)
     pattern!(
         PiiKind::ConnectionString,
-        r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s'\"]+"
+        r#"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s'""]+"#
     ),
     // Private keys
     pattern!(
