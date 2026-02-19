@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use crate::audit::AuditLog;
 use crate::config::{Config, RedactAction};
 use crate::faker::Faker;
-use crate::redactor::{detect, redact, TokenMap};
+use crate::redactor::{detect, TokenMap};
 
 pub struct ProxyState {
     pub target_url: String,

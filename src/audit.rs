@@ -3,7 +3,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tracing::warn;
 
 use crate::config::RedactAction;
 
@@ -21,7 +20,7 @@ pub struct AuditEntry {
 }
 
 pub struct AuditLog {
-    path: PathBuf,
+    _path: PathBuf,
     log_values: bool,
     file: Mutex<Option<std::fs::File>>,
 }
@@ -35,7 +34,7 @@ impl AuditLog {
             .ok();
 
         AuditLog {
-            path,
+            _path: path,
             log_values,
             file: Mutex::new(file),
         }

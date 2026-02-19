@@ -11,7 +11,6 @@ pub struct PiiEntity {
     pub start: usize,
     pub end: usize,
     pub original: String,
-    pub replacement: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -157,7 +156,6 @@ pub fn detect(text: &str) -> Vec<PiiEntity> {
                 start: m.start(),
                 end: m.end(),
                 original: m.as_str().to_string(),
-                replacement: String::new(), // filled during redaction
             });
         }
     }
@@ -179,7 +177,6 @@ pub fn detect(text: &str) -> Vec<PiiEntity> {
                 start: m.start(),
                 end: m.end(),
                 original: s.to_string(),
-                replacement: String::new(),
             });
         }
     }
@@ -190,6 +187,7 @@ pub fn detect(text: &str) -> Vec<PiiEntity> {
 }
 
 /// Redact all PII from text using a token map for consistency
+#[cfg(test)]
 pub fn redact(text: &str, token_map: &TokenMap) -> String {
     let entities = detect(text);
     let mut result = text.to_string();

@@ -14,10 +14,13 @@ pub struct Config {
     #[serde(default)]
     pub rules: Rules,
     #[serde(default)]
+    #[allow(dead_code)]
     pub code_block_passthrough: bool,
     #[serde(default)]
+    #[allow(dead_code)]
     pub allowlist: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub blocklist: Vec<String>,
     #[serde(default)]
     pub audit: AuditConfig,
