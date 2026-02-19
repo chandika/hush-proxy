@@ -9,12 +9,18 @@ use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
-use crate::redactor::{redact, TokenMap};
+use crate::audit::AuditLog;
+use crate::config::{Config, RedactAction};
+use crate::faker::Faker;
+use crate::redactor::{detect, redact, TokenMap};
 
 pub struct ProxyState {
     pub target_url: String,
     pub client: Client,
     pub token_map: TokenMap,
+    pub faker: Faker,
+    pub config: Config,
+    pub audit_log: Option<Arc<AuditLog>>,
 }
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -58,14 +64,13 @@ pub async fn handle_request(
     let redacted_body = if !body_bytes.is_empty() {
         match serde_json::from_slice::<Value>(&body_bytes) {
             Ok(mut json) => {
-                redact_json_value(&mut json, &state.token_map);
+                redact_json_value(&mut json, &state);
                 debug!("Redacted request body");
                 serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec())
             }
             Err(_) => {
-                // Not JSON, redact as raw text
                 let text = String::from_utf8_lossy(&body_bytes);
-                let redacted = redact(&text, &state.token_map);
+                let redacted = smart_redact(&text, &state);
                 redacted.into_bytes()
             }
         }
@@ -73,11 +78,17 @@ pub async fn handle_request(
         body_bytes.to_vec()
     };
 
+    // In dry-run mode, forward the original body
+    let forward_body = if state.config.dry_run {
+        body_bytes.to_vec()
+    } else {
+        redacted_body
+    };
+
     // Build forwarding request
     let target_url = format!("{}{}", state.target_url.trim_end_matches('/'), path);
     let mut forward = state.client.request(method.clone(), &target_url);
 
-    // Forward relevant headers
     for (name, value) in headers.iter() {
         let name_str = name.as_str().to_lowercase();
         match name_str.as_str() {
@@ -92,7 +103,7 @@ pub async fn handle_request(
         }
     }
 
-    forward = forward.body(redacted_body);
+    forward = forward.body(forward_body);
 
     let response = match forward.send().await {
         Ok(resp) => resp,
@@ -114,10 +125,8 @@ pub async fn handle_request(
         .unwrap_or(false);
 
     if is_stream {
-        // Handle SSE streaming response
         handle_streaming_response(status, resp_headers, response, state).await
     } else {
-        // Handle regular response
         handle_regular_response(status, resp_headers, response, state).await
     }
 }
@@ -130,16 +139,15 @@ async fn handle_regular_response(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let body_bytes = response.bytes().await.unwrap_or_default();
 
-    // Rehydrate PII in response
-    let rehydrated_body = if !body_bytes.is_empty() {
+    let rehydrated_body = if !body_bytes.is_empty() && !state.config.dry_run {
         match serde_json::from_slice::<Value>(&body_bytes) {
             Ok(mut json) => {
-                rehydrate_json_value(&mut json, &state.token_map);
+                rehydrate_json_value(&mut json, &state);
                 serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec())
             }
             Err(_) => {
                 let text = String::from_utf8_lossy(&body_bytes);
-                let rehydrated = state.token_map.rehydrate(&text);
+                let rehydrated = rehydrate_all(&text, &state);
                 rehydrated.into_bytes()
             }
         }
@@ -173,14 +181,17 @@ async fn handle_streaming_response(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, hyper::Error>>(32);
 
-    // Spawn a task to read upstream chunks, rehydrate, and forward
     tokio::spawn(async move {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
-                    let rehydrated = state.token_map.rehydrate(&text);
+                    let rehydrated = if state.config.dry_run {
+                        text.to_string()
+                    } else {
+                        rehydrate_all(&text, &state)
+                    };
                     let frame = Frame::data(Bytes::from(rehydrated));
                     if tx.send(Ok(frame)).await.is_err() {
                         break;
@@ -214,20 +225,63 @@ async fn handle_streaming_response(
     Ok(builder.body(boxed).unwrap())
 }
 
-/// Recursively redact PII in JSON values (strings only)
-fn redact_json_value(value: &mut Value, token_map: &TokenMap) {
+/// Smart redaction: uses config to decide action per PII kind
+fn smart_redact(text: &str, state: &ProxyState) -> String {
+    let entities = detect(text);
+    let mut result = text.to_string();
+
+    for entity in &entities {
+        let label = entity.kind.label();
+        let action = state.config.should_redact(label);
+
+        // Audit log
+        if let Some(ref audit) = state.audit_log {
+            audit.log(label, &action, &entity.original, text);
+        }
+
+        match action {
+            RedactAction::Redact => {
+                let token = state.token_map.get_or_insert(&entity.original, &entity.kind);
+                result = result.replace(&entity.original, &token);
+            }
+            RedactAction::Mask => {
+                let fake = match label {
+                    "EMAIL" => state.faker.fake_email(&entity.original),
+                    "PHONE" => state.faker.fake_phone(&entity.original),
+                    _ => state.token_map.get_or_insert(&entity.original, &entity.kind),
+                };
+                result = result.replace(&entity.original, &fake);
+            }
+            RedactAction::Warn => {
+                // Logged above, don't modify
+            }
+            RedactAction::Ignore => {}
+        }
+    }
+
+    result
+}
+
+/// Rehydrate: restore both tokens and fakes
+fn rehydrate_all(text: &str, state: &ProxyState) -> String {
+    let result = state.token_map.rehydrate(text);
+    state.faker.rehydrate(&result)
+}
+
+/// Recursively redact PII in JSON values
+fn redact_json_value(value: &mut Value, state: &ProxyState) {
     match value {
         Value::String(s) => {
-            *s = redact(s, token_map);
+            *s = smart_redact(s, state);
         }
         Value::Array(arr) => {
             for item in arr {
-                redact_json_value(item, token_map);
+                redact_json_value(item, state);
             }
         }
         Value::Object(obj) => {
             for (_, v) in obj.iter_mut() {
-                redact_json_value(v, token_map);
+                redact_json_value(v, state);
             }
         }
         _ => {}
@@ -235,19 +289,19 @@ fn redact_json_value(value: &mut Value, token_map: &TokenMap) {
 }
 
 /// Recursively rehydrate PII tokens in JSON values
-fn rehydrate_json_value(value: &mut Value, token_map: &TokenMap) {
+fn rehydrate_json_value(value: &mut Value, state: &ProxyState) {
     match value {
         Value::String(s) => {
-            *s = token_map.rehydrate(s);
+            *s = rehydrate_all(s, state);
         }
         Value::Array(arr) => {
             for item in arr {
-                rehydrate_json_value(item, token_map);
+                rehydrate_json_value(item, state);
             }
         }
         Value::Object(obj) => {
             for (_, v) in obj.iter_mut() {
-                rehydrate_json_value(v, token_map);
+                rehydrate_json_value(v, state);
             }
         }
         _ => {}

@@ -1,0 +1,62 @@
+# hush-proxy configuration
+# Copy to hush.yaml and customize
+
+# Target LLM API
+target: "https://api.openai.com"
+
+# Proxy settings
+bind: "127.0.0.1"
+port: 8686
+
+# Sensitivity: low | medium | high | paranoid
+# low: only always_redact categories
+# medium: always_redact + mask categories (default)
+# high: always_redact + mask + warn categories
+# paranoid: redact everything detected
+sensitivity: medium
+
+# Categories and their actions
+rules:
+  # Always redact — LLM never needs the real value
+  always_redact:
+    - SSN
+    - CREDIT_CARD
+    - PRIVATE_KEY
+    - AWS_KEY
+    - GITHUB_TOKEN
+    - API_KEY
+    - BEARER_TOKEN
+
+  # Redact with plausible fakes — preserves semantic role
+  mask:
+    - EMAIL
+    - PHONE
+
+  # Log warning but don't redact — too context-dependent
+  warn_only:
+    - IP_ADDRESS
+    - CONNECTION_STRING
+    - SECRET          # high-entropy strings
+
+# Code blocks: don't redact inside ``` fenced blocks
+code_block_passthrough: false
+
+# Allowlist: never redact these values (globs supported)
+allowlist: []
+  # - "192.168.1.*"
+  # - "*@company.com"
+  # - "sk-test-*"
+
+# Blocklist: always redact these (overrides allowlist)
+blocklist: []
+  # - "*@personal.com"
+
+# Audit log
+audit:
+  enabled: true
+  path: "./hush-audit.jsonl"
+  # Log original values (WARNING: defeats the purpose if log is compromised)
+  log_values: false
+
+# Dry run: log what would be redacted without actually redacting
+dry_run: false

@@ -1,3 +1,6 @@
+mod audit;
+mod config;
+mod faker;
 mod proxy;
 mod redactor;
 
@@ -11,6 +14,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+use audit::AuditLog;
+use config::Config;
+use faker::Faker;
 use proxy::{handle_request, ProxyState};
 use redactor::TokenMap;
 
@@ -18,7 +24,7 @@ use redactor::TokenMap;
 #[command(
     name = "hush-proxy",
     version,
-    about = "🤫 A fast PII redaction proxy for LLM APIs",
+    about = "A fast PII redaction proxy for LLM APIs",
     long_about = "Hush sits between your LLM client and provider, automatically redacting \
     PII and secrets from requests and rehydrating them in responses. \
     Sub-millisecond overhead. Zero config. Works with any OpenAI-compatible client."
@@ -26,23 +32,31 @@ use redactor::TokenMap;
 struct Args {
     /// Target LLM API base URL (e.g. https://api.openai.com)
     #[arg(short, long)]
-    target: String,
+    target: Option<String>,
 
     /// Port to listen on
-    #[arg(short, long, default_value = "8686")]
-    port: u16,
+    #[arg(short, long)]
+    port: Option<u16>,
 
     /// Bind address
-    #[arg(short, long, default_value = "127.0.0.1")]
-    bind: String,
+    #[arg(short, long)]
+    bind: Option<String>,
+
+    /// Config file path
+    #[arg(short, long)]
+    config: Option<String>,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
 
-    /// Disable rehydration (one-way redaction only)
-    #[arg(long, default_value = "false")]
-    no_rehydrate: bool,
+    /// Dry run: log what would be redacted without redacting
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Sensitivity level (low, medium, high, paranoid)
+    #[arg(long)]
+    sensitivity: Option<String>,
 }
 
 #[tokio::main]
@@ -56,19 +70,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
 
+    // Load config, then override with CLI args
+    let mut cfg = Config::load(args.config.as_deref());
+
+    if let Some(target) = args.target {
+        cfg.target = target;
+    }
+    if let Some(port) = args.port {
+        cfg.port = port;
+    }
+    if let Some(bind) = args.bind {
+        cfg.bind = bind;
+    }
+    if args.dry_run {
+        cfg.dry_run = true;
+    }
+    if let Some(ref s) = args.sensitivity {
+        cfg.sensitivity = match s.as_str() {
+            "low" => config::Sensitivity::Low,
+            "high" => config::Sensitivity::High,
+            "paranoid" => config::Sensitivity::Paranoid,
+            _ => config::Sensitivity::Medium,
+        };
+    }
+
+    let audit_log = if cfg.audit.enabled {
+        Some(Arc::new(AuditLog::new(cfg.audit.path.clone(), cfg.audit.log_values)))
+    } else {
+        None
+    };
+
     let state = Arc::new(ProxyState {
-        target_url: args.target.clone(),
+        target_url: cfg.target.clone(),
         client: Client::new(),
         token_map: TokenMap::new(),
+        faker: Faker::new(),
+        config: cfg.clone(),
+        audit_log,
     });
 
-    let addr: SocketAddr = format!("{}:{}", args.bind, args.port).parse()?;
+    let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
 
-    info!("🤫 hush-proxy v{}", env!("CARGO_PKG_VERSION"));
-    info!("   Listening on http://{}", addr);
-    info!("   Forwarding to {}", args.target);
-    info!("   Rehydration: {}", if args.no_rehydrate { "off" } else { "on" });
+    info!("hush-proxy v{}", env!("CARGO_PKG_VERSION"));
+    info!("  Listening:    http://{}", addr);
+    info!("  Forwarding:   {}", cfg.target);
+    info!("  Sensitivity:  {:?}", cfg.sensitivity);
+    info!("  Dry run:      {}", cfg.dry_run);
+    if cfg.audit.enabled {
+        info!("  Audit log:    {}", cfg.audit.path.display());
+    }
 
     loop {
         let (stream, remote) = listener.accept().await?;
