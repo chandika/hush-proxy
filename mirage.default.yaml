@@ -1,5 +1,5 @@
-# hush-proxy configuration
-# Copy to hush.yaml and customize
+# mirage-proxy configuration
+# Copy to mirage.yaml and customize
 
 # Target LLM API
 target: "https://api.openai.com"
@@ -54,7 +54,7 @@ blocklist: []
 # Audit log
 audit:
   enabled: true
-  path: "./hush-audit.jsonl"
+  path: "./mirage-audit.jsonl"
   # Log original values (WARNING: defeats the purpose if log is compromised)
   log_values: false
 

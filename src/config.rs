@@ -88,7 +88,7 @@ fn default_bind() -> String { "127.0.0.1".to_string() }
 fn default_port() -> u16 { 8686 }
 fn default_sensitivity() -> Sensitivity { Sensitivity::Medium }
 fn default_true() -> bool { true }
-fn default_audit_path() -> PathBuf { PathBuf::from("./hush-audit.jsonl") }
+fn default_audit_path() -> PathBuf { PathBuf::from("./mirage-audit.jsonl") }
 
 fn default_always_redact() -> Vec<String> {
     vec![
@@ -111,10 +111,10 @@ impl Config {
         let candidates = match path {
             Some(p) => vec![PathBuf::from(p)],
             None => vec![
-                PathBuf::from("hush.yaml"),
-                PathBuf::from("hush.yml"),
+                PathBuf::from("mirage.yaml"),
+                PathBuf::from("mirage.yml"),
                 dirs_next::home_dir()
-                    .map(|h| h.join(".config").join("hush").join("hush.yaml"))
+                    .map(|h| h.join(".config").join("mirage").join("mirage.yaml"))
                     .unwrap_or_default(),
             ],
         };

@@ -24,10 +24,10 @@ use vault::Vault;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "hush-proxy",
+    name = "mirage-proxy",
     version,
     about = "A fast PII redaction proxy for LLM APIs",
-    long_about = "Hush sits between your LLM client and provider, automatically redacting \
+    long_about = "Mirage sits between your LLM client and provider, automatically redacting \
     PII and secrets from requests and rehydrating them in responses. \
     Sub-millisecond overhead. Zero config. Works with any OpenAI-compatible client."
 )]
@@ -60,12 +60,12 @@ struct Args {
     #[arg(long)]
     sensitivity: Option<String>,
 
-    /// Vault encryption key (passphrase). Can also use HUSH_VAULT_KEY env var.
+    /// Vault encryption key (passphrase). Can also use MIRAGE_VAULT_KEY env var.
     #[arg(long)]
     vault_key: Option<String>,
 
     /// Vault file path
-    #[arg(long, default_value = "./hush-vault.enc")]
+    #[arg(long, default_value = "./mirage-vault.enc")]
     vault_path: String,
 
     /// Flush vault after N new mappings (0 = manual only)
@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None
     };
 
-    let vault_key = args.vault_key.or_else(|| std::env::var("HUSH_VAULT_KEY").ok());
+    let vault_key = args.vault_key.or_else(|| std::env::var("MIRAGE_VAULT_KEY").ok());
     let vault = vault_key.as_ref().map(|passphrase| {
         let key = Vault::key_from_passphrase(passphrase);
         let v = Vault::new(
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
 
-    info!("hush-proxy v{}", env!("CARGO_PKG_VERSION"));
+    info!("mirage-proxy v{}", env!("CARGO_PKG_VERSION"));
     info!("  Listening:    http://{}", addr);
     info!("  Forwarding:   {}", cfg.target);
     info!("  Sensitivity:  {:?}", cfg.sensitivity);

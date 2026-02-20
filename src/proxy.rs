@@ -33,7 +33,7 @@ fn full_body(data: Bytes) -> BoxBody {
 }
 
 fn error_response(status: StatusCode, msg: &str) -> Response<BoxBody> {
-    let body = serde_json::json!({ "error": { "message": msg, "type": "hush_proxy_error" } });
+    let body = serde_json::json!({ "error": { "message": msg, "type": "mirage_proxy_error" } });
     Response::builder()
         .status(status)
         .header("content-type", "application/json")

@@ -301,7 +301,7 @@ mod tests {
 
     fn temp_vault_path() -> PathBuf {
         let mut p = env::temp_dir();
-        p.push(format!("hush-vault-test-{}.enc", uuid::Uuid::new_v4()));
+        p.push(format!("mirage-vault-test-{}.enc", uuid::Uuid::new_v4()));
         p
     }
 

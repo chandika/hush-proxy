@@ -1,19 +1,19 @@
-# hush-proxy
+# mirage-proxy
 
 A fast, invisible PII redaction proxy for LLM APIs. Written in Rust.
 
-Your coding agent reads your `.env`, your codebase, your credentials — and sends all of it to the cloud. Hush sits between your client and the provider, silently replacing sensitive data with plausible fakes. The LLM never knows. Your secrets never leave.
+Your coding agent reads your `.env`, your codebase, your credentials — and sends all of it to the cloud. Mirage sits between your client and the provider, silently replacing sensitive data with plausible fakes. The LLM never knows. Your secrets never leave.
 
 ## How it works
 
 ```
 You:     "Email sam@acme.com, key is AKIAIOSFODNN7EXAMPLE"
          ↓
-Hush:    "Email jordan.walker3@proton.me, key is AKIAHQ7RN2XK5M3B9Y1T"
+Mirage:    "Email jordan.walker3@proton.me, key is AKIAHQ7RN2XK5M3B9Y1T"
          ↓
 Provider: (sees only fake data, responds normally)
          ↓
-Hush:    (swaps fakes back to originals)
+Mirage:    (swaps fakes back to originals)
          ↓
 You:     "Done! I've drafted the email to sam@acme.com"
 ```
@@ -23,22 +23,22 @@ No `[REDACTED]`. No `[[PERSON_1]]`. No brackets. The provider sees a completely 
 ## Install
 
 ```bash
-cargo install hush-proxy
+cargo install mirage-proxy
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/chandika/hush-proxy
-cd hush-proxy
+git clone https://github.com/chandika/mirage-proxy
+cd mirage-proxy
 cargo build --release
 ```
 
 ## Quick start
 
 ```bash
-# Point hush at your LLM provider
-hush-proxy --target https://api.openai.com
+# Point mirage at your LLM provider
+mirage-proxy --target https://api.openai.com
 
 # Your client talks to localhost:8686 instead
 export OPENAI_BASE_URL=http://localhost:8686
@@ -47,14 +47,14 @@ export OPENAI_BASE_URL=http://localhost:8686
 ### Claude Code
 
 ```bash
-hush-proxy --target https://api.anthropic.com
+mirage-proxy --target https://api.anthropic.com
 # Set ANTHROPIC_BASE_URL=http://localhost:8686 in your environment
 ```
 
 ### Codex / GPT
 
 ```bash
-hush-proxy --target https://api.openai.com
+mirage-proxy --target https://api.openai.com
 export OPENAI_BASE_URL=http://localhost:8686
 ```
 
@@ -64,7 +64,7 @@ Point the provider base URL to `http://localhost:8686`. Everything else works as
 
 ## What makes this different
 
-**Invisible substitution.** Most PII tools replace sensitive data with ugly tokens like `[EMAIL_1]` or `<REDACTED>`. The LLM sees these, knows data was removed, and produces worse output. Hush replaces PII with plausible fakes that match the format and length of the original. The LLM has no idea redaction happened.
+**Invisible substitution.** Most PII tools replace sensitive data with ugly tokens like `[EMAIL_1]` or `<REDACTED>`. The LLM sees these, knows data was removed, and produces worse output. Mirage replaces PII with plausible fakes that match the format and length of the original. The LLM has no idea redaction happened.
 
 **Session-aware consistency.** Within a conversation, the same email always maps to the same fake. Across conversations, the same email maps to different fakes. History messages stay consistent — if `sam@acme.com` became `jordan.walker3@proton.me` in message 1, it stays that way through message 50.
 
@@ -105,7 +105,7 @@ Every detected value is replaced with a format-matching fake:
 
 ## Configuration
 
-Hush works with zero config. For fine-tuning, create a `hush.yaml`:
+Mirage works with zero config. For fine-tuning, create a `mirage.yaml`:
 
 ```yaml
 target: "https://api.openai.com"
@@ -140,7 +140,7 @@ allowlist:
 
 audit:
   enabled: true
-  path: "./hush-audit.jsonl"
+  path: "./mirage-audit.jsonl"
 
 dry_run: false
 ```
@@ -160,13 +160,13 @@ Mappings persist across restarts so your conversations stay consistent:
 
 ```bash
 # With vault (encrypted persistence)
-hush-proxy --target https://api.openai.com --vault-key "my-passphrase"
+mirage-proxy --target https://api.openai.com --vault-key "my-passphrase"
 
 # Or via environment variable
-HUSH_VAULT_KEY="my-passphrase" hush-proxy --target https://api.openai.com
+MIRAGE_VAULT_KEY="my-passphrase" mirage-proxy --target https://api.openai.com
 ```
 
-The vault file (`hush-vault.enc`) is AES-256-GCM encrypted. Without the passphrase, it's random bytes. Mappings are scoped per conversation session.
+The vault file (`mirage-vault.enc`) is AES-256-GCM encrypted. Without the passphrase, it's random bytes. Mappings are scoped per conversation session.
 
 Without `--vault-key`, mappings live in memory only and reset on restart.
 
@@ -175,14 +175,14 @@ Without `--vault-key`, mappings live in memory only and reset on restart.
 See what would be redacted without actually changing anything:
 
 ```bash
-hush-proxy --target https://api.openai.com --dry-run
+mirage-proxy --target https://api.openai.com --dry-run
 ```
 
 Requests pass through unmodified. Detections are logged to the audit file. Use this to tune your config before going live.
 
 ## Audit log
 
-Every detection is logged to `hush-audit.jsonl`:
+Every detection is logged to `mirage-audit.jsonl`:
 
 ```json
 {"timestamp":"2026-02-19T14:30:00Z","kind":"EMAIL","action":"masked","confidence":1.0,"value_hash":"a3b2c1...","context_snippet":"Email sam@... about the deal"}
@@ -192,20 +192,20 @@ Original values are never logged by default. Enable `audit.log_values: true` onl
 
 ## Streaming
 
-Full SSE streaming support. Hush handles `text/event-stream` responses from providers, rehydrating fakes in real-time as chunks arrive.
+Full SSE streaming support. Mirage handles `text/event-stream` responses from providers, rehydrating fakes in real-time as chunks arrive.
 
 ## CLI reference
 
 ```
-hush-proxy [OPTIONS]
+mirage-proxy [OPTIONS]
 
 Options:
   -t, --target <URL>              Target LLM API base URL (required)
   -p, --port <PORT>               Listen port [default: 8686]
   -b, --bind <ADDR>               Bind address [default: 127.0.0.1]
   -c, --config <PATH>             Config file path
-      --vault-key <PASSPHRASE>    Vault encryption passphrase (or HUSH_VAULT_KEY env)
-      --vault-path <PATH>         Vault file path [default: ./hush-vault.enc]
+      --vault-key <PASSPHRASE>    Vault encryption passphrase (or MIRAGE_VAULT_KEY env)
+      --vault-path <PATH>         Vault file path [default: ./mirage-vault.enc]
       --vault-flush-threshold <N> Auto-flush after N new mappings [default: 50]
       --dry-run                   Log detections without redacting
       --sensitivity <LEVEL>       low | medium | high | paranoid
@@ -216,7 +216,7 @@ Options:
 
 ## Why not PasteGuard / LLM Guard / Presidio?
 
-| | hush-proxy | PasteGuard | LLM Guard | LiteLLM+Presidio |
+| | mirage-proxy | PasteGuard | LLM Guard | LiteLLM+Presidio |
 |---|---|---|---|---|
 | Install | `cargo install` | Docker | pip + models | pip + Docker + spaCy |
 | Binary size | ~5MB | ~500MB+ | ~2GB+ | ~500MB+ |

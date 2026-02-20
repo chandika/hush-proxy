@@ -1,10 +1,10 @@
 [package]
-name = "hush-proxy"
+name = "mirage-proxy"
 version = "0.1.0"
 edition = "2021"
 description = "A fast, lightweight PII redaction proxy for LLM APIs"
 license = "MIT"
-repository = "https://github.com/chandika/hush-proxy"
+repository = "https://github.com/chandika/mirage-proxy"
 keywords = ["pii", "privacy", "llm", "proxy", "redaction"]
 categories = ["command-line-utilities", "web-programming"]
 

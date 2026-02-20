@@ -39,8 +39,8 @@ impl SessionManager {
         let mut hasher = Sha256::new();
         let mut has_signal = false;
 
-        // Check for X-Hush-Session in a custom field (clients can set this)
-        if let Some(session) = body.get("hush_session").and_then(|v| v.as_str()) {
+        // Check for X-Mirage-Session in a custom field (clients can set this)
+        if let Some(session) = body.get("mirage_session").and_then(|v| v.as_str()) {
             return session.to_string();
         }
 
