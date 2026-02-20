@@ -486,14 +486,26 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
                 if is_new {
                     // Print above status bar: clear line, print, newline
                     let preview = truncate_preview(&entity.original, 40);
-                    eprint!("\r\x1b[2K  🛡️  {} → {}\n", label, preview);
+                    let detail = if let Some(ref name) = entity.pattern_name {
+                        format!("{} ({})", label, name)
+                    } else {
+                        label.to_string()
+                    };
+                    let char_count = entity.original.len();
+                    eprint!("\r\x1b[2K  🛡️  {} [{} chars] → {}\n", detail, char_count, preview);
                     new_redaction_count += 1;
                 }
             }
             RedactAction::Warn => {
                 if is_new {
                     let preview = truncate_preview(&entity.original, 40);
-                    eprint!("\r\x1b[2K  ⚠️  {} (warn) → {}\n", label, preview);
+                    let detail = if let Some(ref name) = entity.pattern_name {
+                        format!("{} ({})", label, name)
+                    } else {
+                        label.to_string()
+                    };
+                    let char_count = entity.original.len();
+                    eprint!("\r\x1b[2K  ⚠️  {} (warn) [{} chars] → {}\n", detail, char_count, preview);
                 }
             }
             RedactAction::Ignore => {}

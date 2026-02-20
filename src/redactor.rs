@@ -8,6 +8,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct PiiEntity {
     pub kind: PiiKind,
+    pub pattern_name: Option<String>,
     pub start: usize,
     pub end: usize,
     pub original: String,
@@ -56,8 +57,9 @@ struct PatternDef {
 static PATTERN_DEFS: &[PatternDef] = &[
     PatternDef { kind: PiiKind::Email, pattern: r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" },
     PatternDef { kind: PiiKind::Phone, pattern: r"\+\d{1,3}[-.\s]?\d[\d\-.\s]{6,14}\d" },
-    // US format as separate pattern
-    PatternDef { kind: PiiKind::Phone, pattern: r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}" },
+    // US format: require separators, parens, or +1 prefix to avoid matching bare digit strings (timestamps, IDs)
+    PatternDef { kind: PiiKind::Phone, pattern: r"(?:\+1[-.\s]?)\d{3}[-.\s]?\d{3}[-.\s]?\d{4}" },
+    PatternDef { kind: PiiKind::Phone, pattern: r"\(?\d{3}\)[-.\s]\d{3}[-.\s]?\d{4}" },
     PatternDef { kind: PiiKind::CreditCard, pattern: r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b" },
     PatternDef { kind: PiiKind::Ssn, pattern: r"\b\d{3}-\d{2}-\d{4}\b" },
     PatternDef { kind: PiiKind::IpAddress, pattern: r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b" },
@@ -69,16 +71,16 @@ static PATTERN_DEFS: &[PatternDef] = &[
     PatternDef { kind: PiiKind::PrivateKey, pattern: r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----.+?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----" },
 ];
 
-static COMPILED_PATTERNS: Lazy<Vec<(PiiKind, Regex)>> = Lazy::new(|| {
-    let mut patterns: Vec<(PiiKind, Regex)> = PATTERN_DEFS
+static COMPILED_PATTERNS: Lazy<Vec<(PiiKind, Option<&'static str>, Regex)>> = Lazy::new(|| {
+    let mut patterns: Vec<(PiiKind, Option<&'static str>, Regex)> = PATTERN_DEFS
         .iter()
-        .map(|p| (p.kind.clone(), Regex::new(p.pattern).unwrap()))
+        .map(|p| (p.kind.clone(), None, Regex::new(p.pattern).unwrap()))
         .collect();
 
     // Add extended patterns from Gitleaks + secrets-patterns-db
     for sp in crate::patterns::SECRET_PATTERNS {
         match Regex::new(sp.regex) {
-            Ok(re) => patterns.push((sp.kind.clone(), re)),
+            Ok(re) => patterns.push((sp.kind.clone(), Some(sp.name), re)),
             Err(e) => {
                 eprintln!("  ⚠ skipping pattern '{}': {}", sp.name, e);
             }
@@ -163,10 +165,11 @@ pub fn detect(text: &str) -> Vec<PiiEntity> {
     let mut entities = Vec::new();
 
     // Pattern-based detection
-    for (kind, regex) in COMPILED_PATTERNS.iter() {
+    for (kind, pattern_name, regex) in COMPILED_PATTERNS.iter() {
         for m in regex.find_iter(text) {
             entities.push(PiiEntity {
                 kind: kind.clone(),
+                pattern_name: pattern_name.map(|s| s.to_string()),
                 start: m.start(),
                 end: m.end(),
                 original: m.as_str().to_string(),
@@ -188,6 +191,7 @@ pub fn detect(text: &str) -> Vec<PiiEntity> {
         if shannon_entropy(s) > 4.5 && s.len() >= 32 {
             entities.push(PiiEntity {
                 kind: PiiKind::HighEntropy,
+                pattern_name: Some("High-Entropy String".to_string()),
                 start: m.start(),
                 end: m.end(),
                 original: s.to_string(),
