@@ -2,8 +2,6 @@
 
 **Invisible sensitive data filter for LLM APIs.** Single Rust binary, sub-millisecond overhead.
 
-**Native [OpenClaw](https://openclaw.ai) provider — one command to install. [↓ Jump to OpenClaw](#openclaw)**
-
 Your coding agent reads your `.env`, your codebase, your credentials — and sends all of it to the cloud. Mirage sits between your client and the provider, silently replacing sensitive data with plausible fakes. The LLM never knows. Your secrets never leave.
 
 ```
