@@ -1,14 +1,24 @@
-# 🤫 hush-proxy
+# hush-proxy
 
-A fast, lightweight PII redaction proxy for LLM APIs. Written in Rust. Sub-millisecond overhead.
+A fast, invisible PII redaction proxy for LLM APIs. Written in Rust.
 
-Hush sits between your LLM client (Claude Code, Codex, Cursor, OpenCode, Aider — anything) and the provider, automatically stripping sensitive data from requests and restoring it in responses.
+Your coding agent reads your `.env`, your codebase, your credentials — and sends all of it to the cloud. Hush sits between your client and the provider, silently replacing sensitive data with plausible fakes. The LLM never knows. Your secrets never leave.
 
-## Why
+## How it works
 
-Every message you send to an LLM provider includes your full conversation context. That context often contains API keys, connection strings, email addresses, phone numbers, and other secrets — especially when coding agents read your files and environment.
+```
+You:     "Email sam@acme.com, key is AKIAIOSFODNN7EXAMPLE"
+         ↓
+Hush:    "Email jordan.walker3@proton.me, key is AKIAHQ7RN2XK5M3B9Y1T"
+         ↓
+Provider: (sees only fake data, responds normally)
+         ↓
+Hush:    (swaps fakes back to originals)
+         ↓
+You:     "Done! I've drafted the email to sam@acme.com"
+```
 
-Hush makes sure none of that reaches the provider.
+No `[REDACTED]`. No `[[PERSON_1]]`. No brackets. The provider sees a completely normal request with completely fake data. Responses are rehydrated transparently.
 
 ## Install
 
@@ -22,92 +32,219 @@ Or build from source:
 git clone https://github.com/chandika/hush-proxy
 cd hush-proxy
 cargo build --release
-# Binary at ./target/release/hush-proxy
 ```
 
-## Usage
+## Quick start
 
 ```bash
 # Point hush at your LLM provider
 hush-proxy --target https://api.openai.com
 
-# Now point your client at hush (default: localhost:8686)
-export OPENAI_API_BASE=http://localhost:8686
+# Your client talks to localhost:8686 instead
+export OPENAI_BASE_URL=http://localhost:8686
 ```
 
-### With Claude Code
+### Claude Code
 
 ```bash
 hush-proxy --target https://api.anthropic.com
-# Set base URL in Claude Code config to http://localhost:8686
+# Set ANTHROPIC_BASE_URL=http://localhost:8686 in your environment
 ```
 
-### With Codex
+### Codex / GPT
 
 ```bash
 hush-proxy --target https://api.openai.com
-export OPENAI_API_BASE=http://localhost:8686
+export OPENAI_BASE_URL=http://localhost:8686
 ```
 
-### Custom port
+### Cursor / Continue / Aider / OpenCode
 
-```bash
-hush-proxy --target https://api.openai.com --port 9090
-```
+Point the provider base URL to `http://localhost:8686`. Everything else works as before.
+
+## What makes this different
+
+**Invisible substitution.** Most PII tools replace sensitive data with ugly tokens like `[EMAIL_1]` or `<REDACTED>`. The LLM sees these, knows data was removed, and produces worse output. Hush replaces PII with plausible fakes that match the format and length of the original. The LLM has no idea redaction happened.
+
+**Session-aware consistency.** Within a conversation, the same email always maps to the same fake. Across conversations, the same email maps to different fakes. History messages stay consistent — if `sam@acme.com` became `jordan.walker3@proton.me` in message 1, it stays that way through message 50.
+
+**Encrypted vault.** Mappings persist across restarts in an AES-256-GCM encrypted file. You hold the key. The vault file is useless without it.
+
+**Sub-millisecond overhead.** Pure Rust, pattern-based detection. No ML models, no Docker, no Python, no 500MB spaCy download. A single static binary under 5MB.
 
 ## What it catches
 
-### Layer 1: Pattern matching (< 1ms)
-- **Emails** — `user@example.com`
-- **Phone numbers** — `(555) 123-4567`, `+1-555-123-4567`
-- **Credit cards** — Visa, Mastercard, Amex, Discover
-- **SSNs** — `123-45-6789`
-- **IP addresses** — `192.168.1.1`
-- **AWS keys** — `AKIA...`
-- **GitHub tokens** — `ghp_...`, `ghs_...`
-- **OpenAI/API keys** — `sk-...`, `sk-proj-...`
-- **Bearer tokens** — `Bearer eyJ...`
-- **Connection strings** — `postgres://user:pass@host/db`
-- **Private keys** — PEM-encoded RSA/EC/DSA keys
+### Secrets & credentials
+- AWS keys (`AKIA...`)
+- GitHub tokens (`ghp_...`, `ghs_...`)
+- OpenAI / API keys (`sk-...`, `sk-proj-...`)
+- Slack tokens (`xoxb-...`, `xoxp-...`)
+- Google API keys (`AIza...`)
+- Bearer tokens
+- Connection strings (Postgres, MySQL, MongoDB, Redis)
+- PEM private keys (RSA, EC, DSA, OpenSSH)
+- High-entropy strings (Shannon entropy scanner catches unknown secret formats)
 
-### Layer 2: Entropy detection (< 1ms)
-- Catches unknown secret formats by detecting high-entropy strings (Shannon entropy > 4.5, length ≥ 32)
+### Personal data
+- Email addresses
+- Phone numbers (US/international, all common formats)
+- Social Security Numbers
+- Credit card numbers (Visa, MC, Amex, Discover)
+- IP addresses
 
-## How it works
+Every detected value is replaced with a format-matching fake:
 
-1. **Intercept** — Client sends request to Hush
-2. **Detect** — Pattern matching + entropy analysis finds PII/secrets
-3. **Redact** — Sensitive values replaced with consistent tokens (`[EMAIL_1_a3b2c1d4]`)
-4. **Forward** — Clean request sent to the real provider
-5. **Rehydrate** — Provider response tokens replaced back with original values
-6. **Return** — Client gets a natural response with real data intact
+| Original | Fake |
+|---|---|
+| `sam@acme.com` | `jordan.walker3@proton.me` |
+| `(555) 123-4567` | `(237) 153-1071` |
+| `AKIAIOSFODNN7EXAMPLE` | `AKIAHQ7RN2XK5M3B9Y1T` |
+| `sk-proj-abc123def456...` | `sk-proj-hR4kM9nQ2wX7...` |
+| `postgres://user:pass@host/db` | `postgres://alex:kR4m9Q2w@db37.internal:5432/app_12` |
+| `123-45-6789` | `537-28-4071` |
 
-The token map is consistent within a session — the same email always maps to the same token, so the LLM can maintain context across turns.
+## Configuration
+
+Hush works with zero config. For fine-tuning, create a `hush.yaml`:
+
+```yaml
+target: "https://api.openai.com"
+sensitivity: medium   # low | medium | high | paranoid
+
+rules:
+  # Always redact — LLM never needs the real value
+  always_redact:
+    - SSN
+    - CREDIT_CARD
+    - PRIVATE_KEY
+    - AWS_KEY
+    - GITHUB_TOKEN
+    - API_KEY
+    - BEARER_TOKEN
+
+  # Replace with plausible fakes
+  mask:
+    - EMAIL
+    - PHONE
+
+  # Log but don't touch (too context-dependent)
+  warn_only:
+    - IP_ADDRESS
+    - CONNECTION_STRING
+    - SECRET
+
+# Never redact these values
+allowlist:
+  - "192.168.1.*"
+  - "sk-test-*"
+
+audit:
+  enabled: true
+  path: "./hush-audit.jsonl"
+
+dry_run: false
+```
+
+### Sensitivity levels
+
+| Level | Behavior |
+|---|---|
+| `low` | Only `always_redact` categories |
+| `medium` | `always_redact` + `mask` (default) |
+| `high` | Everything including `warn_only` |
+| `paranoid` | Redact all detected PII regardless of category |
+
+## Encrypted vault
+
+Mappings persist across restarts so your conversations stay consistent:
+
+```bash
+# With vault (encrypted persistence)
+hush-proxy --target https://api.openai.com --vault-key "my-passphrase"
+
+# Or via environment variable
+HUSH_VAULT_KEY="my-passphrase" hush-proxy --target https://api.openai.com
+```
+
+The vault file (`hush-vault.enc`) is AES-256-GCM encrypted. Without the passphrase, it's random bytes. Mappings are scoped per conversation session.
+
+Without `--vault-key`, mappings live in memory only and reset on restart.
+
+## Dry run
+
+See what would be redacted without actually changing anything:
+
+```bash
+hush-proxy --target https://api.openai.com --dry-run
+```
+
+Requests pass through unmodified. Detections are logged to the audit file. Use this to tune your config before going live.
+
+## Audit log
+
+Every detection is logged to `hush-audit.jsonl`:
+
+```json
+{"timestamp":"2026-02-19T14:30:00Z","kind":"EMAIL","action":"masked","confidence":1.0,"value_hash":"a3b2c1...","context_snippet":"Email sam@... about the deal"}
+```
+
+Original values are never logged by default. Enable `audit.log_values: true` only for debugging.
 
 ## Streaming
 
-Full SSE streaming support. Hush processes `text/event-stream` responses chunk-by-chunk with minimal buffering.
+Full SSE streaming support. Hush handles `text/event-stream` responses from providers, rehydrating fakes in real-time as chunks arrive.
 
-## Options
+## CLI reference
 
 ```
+hush-proxy [OPTIONS]
+
 Options:
-  -t, --target <URL>       Target LLM API base URL (required)
-  -p, --port <PORT>        Port to listen on [default: 8686]
-  -b, --bind <ADDR>        Bind address [default: 127.0.0.1]
-      --log-level <LEVEL>  Log level [default: info]
-      --no-rehydrate       Disable rehydration (one-way redaction)
-  -h, --help               Print help
-  -V, --version            Print version
+  -t, --target <URL>              Target LLM API base URL (required)
+  -p, --port <PORT>               Listen port [default: 8686]
+  -b, --bind <ADDR>               Bind address [default: 127.0.0.1]
+  -c, --config <PATH>             Config file path
+      --vault-key <PASSPHRASE>    Vault encryption passphrase (or HUSH_VAULT_KEY env)
+      --vault-path <PATH>         Vault file path [default: ./hush-vault.enc]
+      --vault-flush-threshold <N> Auto-flush after N new mappings [default: 50]
+      --dry-run                   Log detections without redacting
+      --sensitivity <LEVEL>       low | medium | high | paranoid
+      --log-level <LEVEL>         trace | debug | info | warn | error [default: info]
+  -h, --help                      Print help
+  -V, --version                   Print version
 ```
+
+## Why not PasteGuard / LLM Guard / Presidio?
+
+| | hush-proxy | PasteGuard | LLM Guard | LiteLLM+Presidio |
+|---|---|---|---|---|
+| Install | `cargo install` | Docker | pip + models | pip + Docker + spaCy |
+| Binary size | ~5MB | ~500MB+ | ~2GB+ | ~500MB+ |
+| Overhead | <1ms | 10-50ms | 50-200ms | 10-50ms |
+| Substitution | Plausible fakes | `[[PERSON_1]]` tokens | `[REDACTED]` | `<PERSON>` tokens |
+| LLM knows? | No | Yes | Yes | Yes |
+| Session-aware | Yes | No | No | No |
+| Encrypted vault | Yes | No | No | No |
+| Rehydration | Yes | Yes | No | No |
+| Streaming | Yes | Yes | No | Partial |
+| Dependencies | None | Node + Presidio | Python + ML models | Python + spaCy + Docker |
 
 ## Roadmap
 
-- [ ] v1.0 — Pattern + entropy detection, rehydration, streaming (current)
-- [ ] v1.1 — Custom pattern config (YAML), allowlists
-- [ ] v2.0 — Optional ONNX NER model for name/org/location detection
-- [ ] v2.1 — Plausible fake substitution (names → fake names, not tokens)
-- [ ] v3.0 — Multi-provider support (Anthropic native API format)
+- [x] Pattern + entropy detection
+- [x] Invisible plausible fake substitution
+- [x] Session-scoped consistency
+- [x] Encrypted vault persistence
+- [x] Streaming rehydration
+- [x] Audit log + dry-run
+- [x] YAML config with sensitivity levels
+- [ ] Custom pattern definitions
+- [ ] Allowlist/blocklist glob matching
+- [ ] Optional ONNX NER for name/org detection
+- [ ] Multi-provider native format support (Anthropic Messages API)
+- [ ] Route mode (sensitive requests → local Ollama)
+- [ ] npm/brew/scoop distribution
+- [ ] Pre-built binaries for all platforms
 
 ## License
 
