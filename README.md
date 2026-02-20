@@ -42,6 +42,7 @@ No `[REDACTED]`. No `[[PERSON_1]]`. The provider sees a completely normal reques
 - [How it compares](#how-it-compares)
 - [Architecture](#architecture)
 - [Building from source](#building-from-source)
+- [Known limitations](#known-limitations)
 - [Roadmap](#roadmap)
 - [License](#license)
 
@@ -305,7 +306,7 @@ Mirage shows a clean live display — no log spam, just what matters:
   📎 session: claude-sonnet-4-20250514
   🛡️  EMAIL → ops@•••e.com
   🛡️  AWS_KEY → AKIA•••MPLE
-  🛡️  SECRET → EtUC••• [128 chars]
+  ⚠️  SECRET (warn) → EtUC••• [128 chars]
   📊 1h 2m 3s │ 42 reqs │ 3 masked │ 1 sessions │ ↑2.1MB ↓890KB
 ```
 
@@ -372,13 +373,13 @@ rules:
     - GITHUB_TOKEN
     - API_KEY
     - BEARER_TOKEN
-    - CONNECTION_STRING
-    - SECRET
   mask:
     - EMAIL
     - PHONE
   warn_only:
     - IP_ADDRESS
+    - CONNECTION_STRING
+    - SECRET
 
 allowlist:
   - "192.168.1.*"
@@ -462,7 +463,9 @@ Every **new** detection is logged to `mirage-audit.jsonl`:
 
 ## Streaming
 
-Full SSE streaming support. Mirage handles `text/event-stream` responses from providers (Claude, OpenAI, etc.), rehydrating fakes in real-time as chunks arrive. No buffering delays.
+SSE streaming support for providers that return `text/event-stream` (Claude, OpenAI, etc.). Fakes are rehydrated in real-time as chunks arrive.
+
+**Known issue:** rehydration is chunk-by-chunk. If a fake value is split across two SSE chunks, it won't be caught. This can cause repeated or garbled lines in the client UI (observed in Claude Code during extended thinking). A cross-boundary buffer is planned.
 
 ## CLI reference
 
@@ -551,6 +554,14 @@ Pattern detection draws from two open-source databases:
 
 Only high-confidence, low-false-positive patterns are included. Generic "keyword near random string" patterns are excluded to avoid breaking legitimate code.
 
+## Known limitations
+
+- **Streaming chunk boundaries** — rehydration is per-chunk. A fake value split across two SSE events won't be caught, causing occasional display glitches in clients like Claude Code. Fix: small cross-boundary buffer (planned).
+- **Vault key derivation** — currently raw SHA-256. Should be argon2 or scrypt. Works, but not best practice for passphrase-derived keys. On the roadmap.
+- **Detection is regex + entropy only** — no NLP/NER. Won't catch secrets described in natural language ("my key starts with AKIA...") or unusual formats.
+- **Rehydration false positives** — if the LLM independently generates text matching a fake value, it gets swapped. Rare in practice but theoretically possible.
+- **No Windows binary** in current release (Linux + macOS only).
+
 ## Roadmap
 
 - [x] Pattern + entropy detection (11 PII types)
@@ -571,6 +582,8 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 - [x] Pre-built binaries for macOS, Linux, Windows
 - [x] **Native OpenClaw integration (ClawdHub skill)**
 - [x] Binary SHA256 verification in installer
+- [ ] Cross-boundary buffer for streaming rehydration
+- [ ] Argon2/scrypt vault key derivation
 - [ ] Custom pattern definitions in config
 - [ ] Allowlist/blocklist glob matching
 - [ ] Optional ONNX NER for name/organization detection
