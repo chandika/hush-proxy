@@ -83,7 +83,7 @@ impl Default for AuditConfig {
     }
 }
 
-fn default_target() -> String { "https://api.openai.com".to_string() }
+fn default_target() -> String { String::new() }
 fn default_bind() -> String { "127.0.0.1".to_string() }
 fn default_port() -> u16 { 8686 }
 fn default_sensitivity() -> Sensitivity { Sensitivity::Medium }

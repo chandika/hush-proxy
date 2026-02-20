@@ -2,6 +2,7 @@ mod audit;
 mod config;
 mod faker;
 mod patterns;
+mod providers;
 mod proxy;
 mod redactor;
 mod session;
@@ -84,6 +85,10 @@ struct Args {
     /// Remove mirage configuration from all tools
     #[arg(long)]
     uninstall: bool,
+
+    /// List all built-in provider routes
+    #[arg(long)]
+    list_providers: bool,
 }
 
 #[tokio::main]
@@ -98,6 +103,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level)),
         )
         .init();
+
+    // List providers
+    if args.list_providers {
+        eprintln!();
+        eprintln!("  Built-in provider routes ({} providers)", providers::PROVIDERS.len());
+        eprintln!("  ─────────────────────────────────────────────────");
+        for p in providers::PROVIDERS {
+            eprintln!("  {:16} {:14} → {}", p.name, p.prefix, p.upstream);
+        }
+        eprintln!();
+        eprintln!("  Usage: set your tool's base URL to http://localhost:8686{{prefix}}");
+        eprintln!("  Example: ANTHROPIC_BASE_URL=http://localhost:8686/anthropic");
+        eprintln!();
+        return Ok(());
+    }
 
     // Handle setup command
     if args.setup || args.uninstall {
@@ -166,7 +186,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     eprintln!("  \x1b[1mmirage-proxy\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("  ─────────────────────────────────────");
     eprintln!("  listen:  http://{}", addr);
-    eprintln!("  target:  {}", cfg.target);
+    if cfg.target.is_empty() {
+        eprintln!("  target:  \x1b[36mmulti-provider\x1b[0m (use path prefixes)");
+        eprintln!("           /anthropic → api.anthropic.com");
+        eprintln!("           /openai    → api.openai.com");
+        eprintln!("           /google    → generativelanguage.googleapis.com");
+        eprintln!("           /deepseek  → api.deepseek.com");
+        eprintln!("           ... and {} more (--list-providers)", providers::PROVIDERS.len() - 4);
+    } else {
+        eprintln!("  target:  {}", cfg.target);
+    }
     eprintln!("  mode:    {}{}", if cfg.dry_run { "dry-run " } else { "" }, format!("{:?}", cfg.sensitivity).to_lowercase());
     if cfg.audit.enabled {
         eprintln!("  audit:   {}", cfg.audit.path.display());

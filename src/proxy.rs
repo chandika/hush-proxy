@@ -101,8 +101,19 @@ pub async fn handle_request(
         redacted_body
     };
 
-    // Build forwarding request
-    let target_url = format!("{}{}", state.target_url.trim_end_matches('/'), path);
+    // Resolve target: check provider routing first, then fall back to --target
+    let (target_url, forward_path) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(&path) {
+        (format!("{}{}", upstream.trim_end_matches('/'), remaining), remaining)
+    } else if !state.target_url.is_empty() {
+        (format!("{}{}", state.target_url.trim_end_matches('/'), &path), path.clone())
+    } else {
+        warn!("No provider matched for path: {}", path);
+        return Ok(error_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("No provider configured for path: {}. Use a provider prefix (e.g. /anthropic, /openai) or set --target.", path),
+        ));
+    };
+    let _ = forward_path; // used for clarity, target_url has the full URL
     let mut forward = state.client.request(method.clone(), &target_url);
 
     for (name, value) in headers.iter() {
