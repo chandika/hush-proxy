@@ -14,7 +14,10 @@ pub struct Tool {
 
 /// Detect installed LLM tools and configure them to use mirage
 pub fn run_setup(port: u16, uninstall: bool) {
-    let mirage_url = format!("http://localhost:{}", port);
+    let base_url = format!("http://localhost:{}", port);
+    let mirage_url = base_url.clone(); // legacy compat
+    let anthropic_url = format!("{}/anthropic", base_url);
+    let openai_url = base_url.clone(); // OpenAI auto-routes /v1/* and /responses
 
     println!();
     println!("  mirage-proxy setup");
@@ -36,25 +39,25 @@ pub fn run_setup(port: u16, uninstall: bool) {
     let mut tools_configured = 0;
 
     // Claude Code
-    if let Some(configured) = setup_claude_code(&home, &mirage_url) {
+    if let Some(configured) = setup_claude_code(&home, &anthropic_url) {
         tools_found += 1;
         if configured { tools_configured += 1; }
     }
 
     // Cursor
-    if let Some(configured) = setup_cursor(&home, &mirage_url) {
+    if let Some(configured) = setup_cursor(&home, &openai_url) {
         tools_found += 1;
         if configured { tools_configured += 1; }
     }
 
     // Codex / OpenAI CLI
-    if let Some(configured) = setup_openai_env(&home, &mirage_url) {
+    if let Some(configured) = setup_openai_env(&home, &openai_url) {
         tools_found += 1;
         if configured { tools_configured += 1; }
     }
 
     // Aider
-    if let Some(configured) = setup_aider(&home, &mirage_url) {
+    if let Some(configured) = setup_aider(&home, &anthropic_url) {
         tools_found += 1;
         if configured { tools_configured += 1; }
     }
@@ -169,8 +172,11 @@ fn setup_aider(home: &Path, mirage_url: &str) -> Option<bool> {
 }
 
 /// Add env vars to shell profile
-fn setup_shell_profile(home: &Path, mirage_url: &str, port: u16) {
-    let marker = "# mirage-proxy";
+fn setup_shell_profile(home: &Path, _mirage_url: &str, port: u16) {
+    let base = format!("http://localhost:{}", port);
+    let anthropic = format!("{}/anthropic", base);
+    let openai = base.clone(); // auto-routes /v1/* and /responses
+
     let block = format!(
         r#"
 # mirage-proxy — invisible sensitive data filter for LLM APIs
@@ -179,7 +185,7 @@ export ANTHROPIC_BASE_URL="{}"
 export OPENAI_BASE_URL="{}"
 export OPENAI_API_BASE="{}"
 # mirage-proxy-end"#,
-        mirage_url, mirage_url, mirage_url
+        anthropic, openai, openai
     );
 
     // Detect shell
@@ -187,10 +193,9 @@ export OPENAI_API_BASE="{}"
     let profile_path = if shell.contains("zsh") {
         home.join(".zshrc")
     } else if shell.contains("fish") {
-        // Fish uses a different format, skip for now
         println!("  [!] Fish shell detected — add manually:");
-        println!("      set -gx ANTHROPIC_BASE_URL {}", mirage_url);
-        println!("      set -gx OPENAI_BASE_URL {}", mirage_url);
+        println!("      set -gx ANTHROPIC_BASE_URL {}", anthropic);
+        println!("      set -gx OPENAI_BASE_URL {}", openai);
         return;
     } else {
         home.join(".bashrc")
@@ -198,7 +203,7 @@ export OPENAI_API_BASE="{}"
 
     // Check if already configured
     if let Ok(content) = fs::read_to_string(&profile_path) {
-        if content.contains(marker) {
+        if content.contains("# mirage-proxy") {
             println!("  [✓] Shell profile — already configured ({})", profile_path.display());
             return;
         }
