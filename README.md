@@ -29,13 +29,13 @@ Mirage fixes this at the network layer. It sits between your tool and the provid
 
 ```bash
 brew install chandika/tap/mirage-proxy    # macOS / Linux
-mirage-proxy --service-install            # start daemon + enable for all tools
+mirage-proxy --service-install            # installs daemon + shell integration
 ```
 
-Done. Every LLM tool you open now routes through mirage.
+Done. Mirage runs as a background service and is ON by default for new terminals.
 
 ```
-🛡️ mirage active        ← you'll see this in every new terminal
+🛡️ mirage active (vX.Y.Z)
 ```
 
 <details>
@@ -92,13 +92,21 @@ Mirage runs as a background daemon on port 8686. It auto-routes to 28+ providers
 | **Continue** | `OPENAI_BASE_URL` | Nothing |
 | **Any OpenAI-compatible tool** | `OPENAI_BASE_URL` | Nothing |
 
-### Toggle
+### Day-to-day commands
 
 ```bash
+mirage on       # route this terminal through mirage
 mirage off      # this terminal goes direct (daemon stays running)
-mirage on       # back to filtered
-mirage status   # check state
+mirage status   # daemon/filter status + binary/daemon versions
+mirage logs     # live tail of redactions and session events
 ```
+
+### Service model (important)
+
+- `mirage-proxy --service-install` installs a daemon (launchd/systemd/Task Scheduler)
+- Shell integration exports provider base URLs in new terminals
+- `mirage on/off` only toggles env vars for the current shell
+- `mirage logs` is the easiest way to watch what is being redacted after install
 
 ### Dry run
 
@@ -247,10 +255,37 @@ AES-256-GCM encryption. Argon2id key derivation. Without the passphrase, the vau
 
 - **Regex + entropy only** — no NLP/NER. Won't catch secrets described in natural language.
 - **Streaming boundaries** — 128-byte overlap buffer handles most cases, but very long fake values split exactly at a chunk boundary can slip through.
-- **Rehydration false positives** — if the LLM independently generates text matching a fake value, it gets swapped. Rare in practice.
+- **Signed thinking blocks are immutable** — Anthropic validates signatures on extended thinking payloads. Mirage intentionally skips modifying signed thinking blocks.
+- **Compressed responses are handled safely** — Mirage now decompresses → rehydrates → recompresses. If decompression/recompression fails, it passes through original bytes to avoid corrupting streams.
 - **Google bot detection** — Google's APIs use TLS fingerprinting. Mirage's `reqwest`/`rustls` fingerprint can trigger bot checks. Use the `bypass` config for Google providers.
 
 ---
+
+## Troubleshooting
+
+### `Invalid signature in thinking block` (Claude Code)
+
+Use latest mirage version. Mirage skips signed Anthropic thinking blocks now. If you still see this:
+
+```bash
+mirage-proxy --service-uninstall
+mirage-proxy --service-install
+mirage status
+```
+
+### `Decompression error: ZlibError`
+
+Use latest mirage version. Responses are now decompressed/rehydrated/recompressed safely. If it persists, collect raw logs:
+
+```bash
+mirage logs
+# or full logs:
+tail -f ~/.mirage/mirage-proxy.log
+```
+
+### Lots of `No provider matched for path: /`
+
+Those are health checks. Harmless.
 
 ## CLI reference
 
