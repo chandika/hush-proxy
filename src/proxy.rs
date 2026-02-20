@@ -721,6 +721,20 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
             }
         }
         Value::Object(obj) => {
+            // Anthropic signed thinking blocks must never be modified.
+            // Shape example:
+            // {"type":"thinking","thinking":"...","signature":"base64..."}
+            let is_signed_thinking = obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "thinking")
+                .unwrap_or(false)
+                && obj.get("signature").is_some();
+
+            if is_signed_thinking {
+                return;
+            }
+
             for (key, v) in obj.iter_mut() {
                 if should_skip_key(key) {
                     continue; // Never redact auth/config fields
