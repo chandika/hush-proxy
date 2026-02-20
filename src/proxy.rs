@@ -328,6 +328,25 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
 }
 
 /// Recursively redact PII in JSON values
+/// JSON keys that should NEVER be redacted — auth tokens, model names, metadata
+const SKIP_REDACT_KEYS: &[&str] = &[
+    "api_key", "apikey", "api-key",
+    "authorization", "auth", "token",
+    "x-api-key", "x_api_key",
+    "secret_key", "secret",
+    "access_token", "refresh_token",
+    "session_token", "session_key",
+    "bearer", "credentials",
+    "model", "stream",
+    "anthropic-version", "openai-organization",
+    "mirage_session",
+];
+
+fn should_skip_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    SKIP_REDACT_KEYS.iter().any(|&k| lower == k)
+}
+
 fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
     match value {
         Value::String(s) => {
@@ -339,7 +358,10 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
             }
         }
         Value::Object(obj) => {
-            for (_, v) in obj.iter_mut() {
+            for (key, v) in obj.iter_mut() {
+                if should_skip_key(key) {
+                    continue; // Never redact auth/config fields
+                }
                 redact_json_value(v, state, faker);
             }
         }
