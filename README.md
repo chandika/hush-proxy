@@ -27,10 +27,15 @@ Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends 
 ## Install
 
 ```bash
+# Pre-built binaries (macOS, Linux)
+# → https://github.com/chandika/mirage-proxy/releases
+
+# Or build from source
+cargo install --git https://github.com/chandika/mirage-proxy
+
+# Or via crates.io
 cargo install mirage-proxy
 ```
-
-Pre-built binaries: see [Releases](https://github.com/chandika/mirage-proxy/releases).
 
 ## Quick start
 
