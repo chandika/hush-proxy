@@ -55,6 +55,8 @@ struct PatternDef {
 
 static PATTERN_DEFS: &[PatternDef] = &[
     PatternDef { kind: PiiKind::Email, pattern: r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" },
+    PatternDef { kind: PiiKind::Phone, pattern: r"\+\d{1,3}[-.\s]?\d[\d\-.\s]{6,14}\d" },
+    // US format as separate pattern
     PatternDef { kind: PiiKind::Phone, pattern: r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}" },
     PatternDef { kind: PiiKind::CreditCard, pattern: r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b" },
     PatternDef { kind: PiiKind::Ssn, pattern: r"\b\d{3}-\d{2}-\d{4}\b" },
