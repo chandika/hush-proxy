@@ -52,8 +52,10 @@ pub static PROVIDERS: &[Provider] = &[
 
 /// Resolve a request path to (upstream_base_url, remaining_path).
 /// If a provider prefix matches, strip it and return the upstream.
-/// Returns None if no prefix matches (use --target fallback).
+/// Falls back to auto-detection for common API paths.
+/// Returns None if nothing matches (use --target fallback).
 pub fn resolve_provider(path: &str) -> Option<(&'static str, String)> {
+    // Explicit prefix match
     for p in PROVIDERS {
         if path.starts_with(p.prefix) {
             let remaining = &path[p.prefix.len()..];
@@ -61,5 +63,11 @@ pub fn resolve_provider(path: &str) -> Option<(&'static str, String)> {
             return Some((p.upstream, remaining.to_string()));
         }
     }
+
+    // Auto-detect common OpenAI paths (Codex uses /responses, /v1/chat/completions, etc.)
+    if path.starts_with("/v1/") || path.starts_with("/responses") {
+        return Some(("https://api.openai.com", path.to_string()));
+    }
+
     None
 }
