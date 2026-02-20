@@ -64,9 +64,20 @@ pub fn resolve_provider(path: &str) -> Option<(&'static str, String)> {
         }
     }
 
-    // Auto-detect common OpenAI paths (Codex uses /responses, /v1/chat/completions, etc.)
-    if path.starts_with("/v1/") || path.starts_with("/responses") {
+    // Auto-detect common OpenAI paths
+    if path.starts_with("/v1/") {
+        // Client set base_url to root, sending /v1/... directly
         return Some(("https://api.openai.com", path.to_string()));
+    }
+    // Codex CLI sets OPENAI_BASE_URL and appends /responses, /chat/completions, etc.
+    // These need /v1 prepended for OpenAI's actual API
+    if path.starts_with("/responses")
+        || path.starts_with("/chat/completions")
+        || path.starts_with("/completions")
+        || path.starts_with("/embeddings")
+        || path.starts_with("/models")
+    {
+        return Some(("https://api.openai.com", format!("/v1{}", path)));
     }
 
     None
