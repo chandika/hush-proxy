@@ -106,7 +106,7 @@ async fn forward_request(
     for (name, value) in headers.iter() {
         let name_str = name.as_str().to_lowercase();
         match name_str.as_str() {
-            "host" | "connection" | "transfer-encoding" | "content-length" => continue,
+            "host" | "connection" | "transfer-encoding" | "content-length" | "accept-encoding" => continue,
             _ => {
                 if let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
                     if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_ref()) {
@@ -116,6 +116,8 @@ async fn forward_request(
             }
         }
     }
+    // Force identity encoding so response rehydration can operate safely on plain text/JSON.
+    forward = forward.header("accept-encoding", "identity");
     forward = forward.body(body);
 
     let response = match forward.send().await {
@@ -297,7 +299,7 @@ pub async fn handle_request(
     for (name, value) in headers.iter() {
         let name_str = name.as_str().to_lowercase();
         match name_str.as_str() {
-            "host" | "connection" | "transfer-encoding" | "content-length" => {
+            "host" | "connection" | "transfer-encoding" | "content-length" | "accept-encoding" => {
                 debug!("  ⊘ skipping header: {}", name_str);
                 continue;
             }
@@ -321,6 +323,9 @@ pub async fn handle_request(
     for h in &forwarded_headers {
         debug!("  → {}", h);
     }
+
+    // Force identity encoding so response rehydration can operate safely on plain text/JSON.
+    forward = forward.header("accept-encoding", "identity");
 
     forward = forward.body(forward_body);
 
@@ -396,23 +401,43 @@ async fn handle_regular_response(
 
     // Rehydrate: replace fakes back to originals in the response.
     // Safety guards:
-    // - Skip compressed responses (rehydrating compressed bytes corrupts stream)
-    // - Skip Anthropic signed thinking blocks (mutation invalidates signature)
+    // - Never mutate signed thinking payloads (signature would break)
+    // - For compressed responses: decompress -> rehydrate -> recompress
     let content_encoding = header_content_encoding(&resp_headers);
     let is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
 
     let rehydrated_body = if !body_bytes.is_empty() && !state.config.dry_run {
-        let text = String::from_utf8_lossy(&body_bytes);
-
         if is_compressed {
-            debug!("skipping rehydration for compressed response (content-encoding={})", content_encoding);
-            body_bytes.to_vec()
-        } else if has_anthropic_thinking_signature(&text) {
-            debug!("skipping rehydration for signed thinking response");
-            body_bytes.to_vec()
+            match decompress_body(&body_bytes, &content_encoding) {
+                Ok(decoded) => {
+                    let text = String::from_utf8_lossy(&decoded);
+                    if has_anthropic_thinking_signature(&text) {
+                        debug!("skipping rehydration for signed thinking response (compressed)");
+                        body_bytes.to_vec()
+                    } else {
+                        let rehydrated = faker.rehydrate(&text);
+                        match compress_body(rehydrated.as_bytes(), &content_encoding) {
+                            Ok(encoded) => encoded,
+                            Err(e) => {
+                                warn!("failed to re-compress rehydrated response: {}", e);
+                                body_bytes.to_vec()
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to decompress response body (content-encoding={}): {}", content_encoding, e);
+                    body_bytes.to_vec()
+                }
+            }
         } else {
-            let rehydrated = faker.rehydrate(&text);
-            rehydrated.into_bytes()
+            let text = String::from_utf8_lossy(&body_bytes);
+            if has_anthropic_thinking_signature(&text) {
+                debug!("skipping rehydration for signed thinking response");
+                body_bytes.to_vec()
+            } else {
+                faker.rehydrate(&text).into_bytes()
+            }
         }
     } else {
         body_bytes.to_vec()
@@ -454,14 +479,13 @@ async fn handle_streaming_response(
         // Buffer to handle fake values split across chunk boundaries.
         const BOUNDARY_BUF_SIZE: usize = 128;
         let mut leftover = String::new();
-        let mut skip_for_signed_thinking = false;
 
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     stats_clone.add_response(bytes.len() as u64);
 
-                    let bypass_rehydrate = state.config.dry_run || stream_is_compressed || skip_for_signed_thinking;
+                    let bypass_rehydrate = state.config.dry_run || stream_is_compressed;
                     let out = if bypass_rehydrate {
                         if leftover.is_empty() {
                             bytes.to_vec()
@@ -484,8 +508,7 @@ async fn handle_streaming_response(
 
                         // Do not touch signed thinking payloads (Anthropic validates signatures)
                         if has_anthropic_thinking_signature(&combined) {
-                            skip_for_signed_thinking = true;
-                            debug!("detected signed thinking chunk in SSE stream — disabling rehydration for remainder");
+                            debug!("detected signed thinking chunk in SSE stream — passing through unchanged");
                             combined.into_bytes()
                         } else {
                             // Hold back tail as overlap to catch boundary-split fake values
@@ -519,7 +542,9 @@ async fn handle_streaming_response(
         }
 
         if !leftover.is_empty() {
-            let flushed = if state.config.dry_run || stream_is_compressed || skip_for_signed_thinking {
+            let flushed = if state.config.dry_run || stream_is_compressed {
+                leftover.into_bytes()
+            } else if has_anthropic_thinking_signature(&leftover) {
                 leftover.into_bytes()
             } else {
                 faker.rehydrate(&leftover).into_bytes()
