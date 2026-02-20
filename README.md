@@ -65,12 +65,36 @@ mirage-proxy --target https://api.anthropic.com
 
 **Codex / OpenAI:**
 ```bash
+# Multi-provider mode (no --target needed):
+mirage-proxy
+export OPENAI_BASE_URL=http://localhost:8686
+
+# Or single-provider mode:
 mirage-proxy --target https://api.openai.com
 export OPENAI_BASE_URL=http://localhost:8686
 ```
 
+> **Codex CLI with ChatGPT Plus/Pro/Team:** Mirage automatically detects ChatGPT account auth and routes to the correct backend (`chatgpt.com/backend-api/codex/*`). Works with both API key and ChatGPT subscription auth — no extra config needed.
+
 **Cursor / Continue / Aider / OpenCode:**
 Point the provider base URL to `http://localhost:8686`. Everything else works as before.
+
+### Multi-provider mode
+
+Without `--target`, Mirage acts as a multi-provider proxy. Route to any provider using path prefixes:
+
+```bash
+mirage-proxy  # no --target
+
+# Requests auto-route based on path or header:
+# /anthropic/*  → api.anthropic.com
+# /openai/*     → api.openai.com
+# /v1/*         → api.openai.com
+# /responses    → api.openai.com (or chatgpt.com for ChatGPT auth)
+# /google/*     → generativelanguage.googleapis.com
+# /deepseek/*   → api.deepseek.com
+# ... and 24 more (mirage-proxy --list-providers)
+```
 
 ## Live output
 
@@ -351,8 +375,11 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 - [ ] Allowlist/blocklist glob matching
 - [ ] Optional ONNX NER for name/organization detection
 - [ ] Route mode (sensitive requests → local model)
+- [x] Multi-provider routing (28+ providers, auto-detect)
+- [x] ChatGPT account auth support (Codex CLI with Plus/Pro/Team)
+- [x] zstd/gzip compressed body handling
 - [ ] Homebrew / npm / scoop distribution
-- [ ] Pre-built binaries for macOS, Linux, Windows
+- [ ] Pre-built binaries for macOS, Linux, Windows (CI in progress)
 
 ## License
 
