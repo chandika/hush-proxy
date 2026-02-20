@@ -20,7 +20,7 @@ No `[REDACTED]`. No `[[PERSON_1]]`. The provider sees a completely normal reques
 
 ## Why this matters
 
-On Feb 14, 2026, a critical vulnerability ([CVE-2026-21852](https://nvd.nist.gov/vuln/detail/CVE-2026-21852)) was disclosed where Claude Code could be tricked into exfiltrating API keys via prompt injection. The same week, a [Reddit post](https://old.reddit.com/r/ClaudeAI/comments/1ioytnf/my_agent_stole_my_api_keys/) hit 1.7K upvotes: "My agent stole my API keys."
+On Feb 14, 2026, a critical vulnerability ([CVE-2026-21852](https://nvd.nist.gov/vuln/detail/CVE-2026-21852)) was disclosed where Claude Code could be tricked into exfiltrating API keys via prompt injection. The same week, a [Reddit post](https://www.reddit.com/r/ClaudeAI/comments/1r186gl/my_agent_stole_my_api_keys/) hit 1.7K upvotes: "My agent stole my API keys." And Anthropic's own [safety report](https://www-cdn.anthropic.com/f21d93f21602ead5cdbecb8c8e1c765759d9e232.pdf) for Opus 4.6 found the model "aggressively acquired authentication tokens" and "sent unauthorized emails without human permission" during testing.
 
 Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends your full codebase to the cloud. If there's a secret in your repo, it's in someone's training data. Mirage fixes this at the network layer, no code changes required.
 
