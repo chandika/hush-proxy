@@ -66,13 +66,16 @@ pub fn resolve_provider(path: &str) -> Option<(&'static str, String)> {
 
     // Auto-detect OpenAI paths.
     // /v1/* passes through as-is (client already includes prefix).
-    // Bare paths like /responses, /chat/completions, /models get /v1 prepended
-    // (Codex CLI sends bare /responses — OpenAI needs /v1/responses).
+    // /responses is the new Responses API — does NOT use /v1/ prefix.
+    // Other bare paths like /chat/completions, /models get /v1 prepended.
     if path.starts_with("/v1/") {
         return Some(("https://api.openai.com", path.to_string()));
     }
-    if path.starts_with("/responses")
-        || path.starts_with("/chat/completions")
+    // Responses API: forward as-is (no /v1/ prefix — different auth scopes)
+    if path.starts_with("/responses") {
+        return Some(("https://api.openai.com", path.to_string()));
+    }
+    if path.starts_with("/chat/completions")
         || path.starts_with("/completions")
         || path.starts_with("/embeddings")
         || path.starts_with("/models")
