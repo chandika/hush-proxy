@@ -23,6 +23,8 @@ pub struct Config {
     #[allow(dead_code)]
     pub blocklist: Vec<String>,
     #[serde(default)]
+    pub bypass: Vec<String>,
+    #[serde(default)]
     pub audit: AuditConfig,
     #[serde(default)]
     pub dry_run: bool,
@@ -185,10 +187,22 @@ impl Config {
             code_block_passthrough: false,
             allowlist: vec![],
             blocklist: vec![],
+            bypass: vec![],
             audit: AuditConfig::default(),
             dry_run: false,
             update_check: UpdateCheckConfig::default(),
         }
+    }
+
+    /// Check if a host/URL should bypass filtering (pass through unmodified)
+    pub fn is_bypassed(&self, upstream: &str) -> bool {
+        if self.bypass.is_empty() {
+            return false;
+        }
+        self.bypass.iter().any(|pattern| {
+            // Match against the upstream URL or just the hostname
+            upstream.contains(pattern)
+        })
     }
 
     /// Check if a PII kind should be redacted given current sensitivity

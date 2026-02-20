@@ -94,6 +94,15 @@ struct Args {
     /// Disable automatic version update check
     #[arg(long)]
     no_update_check: bool,
+
+    /// Wrap a command: start proxy, run command with proxy env vars, stop on exit.
+    /// No permanent config changes. Example: mirage-proxy --wrap "claude"
+    #[arg(long, value_name = "COMMAND")]
+    wrap: Option<String>,
+
+    /// Extra args to pass to the wrapped command
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    wrap_args: Vec<String>,
 }
 
 #[tokio::main]
@@ -136,6 +145,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let port = args.port.unwrap_or(8686);
         setup::run_setup(port, args.uninstall);
         return Ok(());
+    }
+
+    // Handle --wrap mode: start proxy, run command, stop on exit
+    if let Some(ref wrap_cmd) = args.wrap {
+        return run_wrap_mode(&args, wrap_cmd).await;
     }
 
     // Load config, then override with CLI args
@@ -299,4 +313,130 @@ fn disable_update_check_from_env() -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// Wrap mode: start proxy in background, run a command with proxy env vars, stop on exit.
+/// Nothing is written to disk. When the child exits, the proxy stops.
+async fn run_wrap_mode(args: &Args, cmd: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::process::Stdio;
+    use tokio::signal;
+
+    let port = args.port.unwrap_or(8686);
+    let bind = args.bind.as_deref().unwrap_or("127.0.0.1");
+    let base = format!("http://{}:{}", bind, port);
+
+    // Build the proxy args (reuse current binary)
+    let exe = std::env::current_exe()?;
+    let mut proxy_args = vec![
+        "--port".to_string(), port.to_string(),
+        "--bind".to_string(), bind.to_string(),
+    ];
+    if let Some(ref target) = args.target {
+        proxy_args.push("--target".to_string());
+        proxy_args.push(target.clone());
+    }
+    if let Some(ref config) = args.config {
+        proxy_args.push("--config".to_string());
+        proxy_args.push(config.clone());
+    }
+    if let Some(ref sensitivity) = args.sensitivity {
+        proxy_args.push("--sensitivity".to_string());
+        proxy_args.push(sensitivity.clone());
+    }
+    if let Some(ref vault_key) = args.vault_key {
+        proxy_args.push("--vault-key".to_string());
+        proxy_args.push(vault_key.clone());
+    }
+    if args.dry_run {
+        proxy_args.push("--dry-run".to_string());
+    }
+    proxy_args.push("--no-update-check".to_string());
+
+    // Start the proxy as a child process
+    eprintln!("  🔄 Starting mirage-proxy on :{} ...", port);
+    let mut proxy_proc = tokio::process::Command::new(&exe)
+        .args(&proxy_args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+
+    // Wait for proxy to be ready (poll health endpoint)
+    let client = reqwest::Client::new();
+    let health_url = format!("{}/", base);
+    let mut ready = false;
+    for _ in 0..30 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        if let Ok(resp) = client.get(&health_url).send().await {
+            let status = resp.status().as_u16();
+            // 502 or 404 means proxy is running (no matching route, which is expected)
+            if status == 502 || status == 404 || status == 200 {
+                ready = true;
+                break;
+            }
+        }
+    }
+
+    if !ready {
+        eprintln!("  ✗ mirage-proxy failed to start within 6 seconds");
+        proxy_proc.kill().await.ok();
+        std::process::exit(1);
+    }
+
+    eprintln!("  ✓ Proxy ready");
+    eprintln!();
+
+    // Build env vars for the child — set all known base URLs to point at proxy
+    let env_vars: Vec<(&str, String)> = vec![
+        ("ANTHROPIC_BASE_URL", format!("{}/anthropic", base)),
+        ("OPENAI_BASE_URL", base.clone()),
+        ("GOOGLE_API_BASE_URL", format!("{}/google", base)),
+        ("MISTRAL_API_BASE_URL", format!("{}/mistral", base)),
+        ("DEEPSEEK_BASE_URL", format!("{}/deepseek", base)),
+        ("COHERE_API_BASE_URL", format!("{}/cohere", base)),
+        ("GROQ_BASE_URL", format!("{}/groq", base)),
+        ("TOGETHER_BASE_URL", format!("{}/together", base)),
+        ("OPENROUTER_BASE_URL", format!("{}/openrouter", base)),
+        ("XAI_BASE_URL", format!("{}/xai", base)),
+    ];
+
+    // Parse the command — split on spaces (simple), or use shell
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let full_cmd = if args.wrap_args.is_empty() {
+        cmd.to_string()
+    } else {
+        format!("{} {}", cmd, args.wrap_args.join(" "))
+    };
+
+    eprintln!("  ▶ Running: {}", full_cmd);
+    eprintln!();
+
+    let mut child = tokio::process::Command::new(&shell)
+        .arg("-c")
+        .arg(&full_cmd)
+        .envs(env_vars.iter().map(|(k, v)| (*k, v.as_str())))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .stdin(Stdio::inherit())
+        .spawn()?;
+
+    // Wait for either child exit or Ctrl+C
+    let exit_code = tokio::select! {
+        status = child.wait() => {
+            status.map(|s| s.code().unwrap_or(1)).unwrap_or(1)
+        }
+        _ = signal::ctrl_c() => {
+            eprintln!("\n  ⏹ Interrupted — stopping...");
+            child.kill().await.ok();
+            130
+        }
+    };
+
+    // Stop the proxy
+    eprintln!();
+    eprintln!("  ⏹ Stopping mirage-proxy...");
+    proxy_proc.kill().await.ok();
+    proxy_proc.wait().await.ok();
+    eprintln!("  ✓ Clean exit");
+
+    std::process::exit(exit_code);
 }
