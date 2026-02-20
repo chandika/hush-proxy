@@ -5,6 +5,7 @@ mod proxy;
 mod redactor;
 mod session;
 mod setup;
+mod stats;
 mod vault;
 
 use clap::Parser;
@@ -21,6 +22,7 @@ use audit::AuditLog;
 use config::Config;
 use proxy::{handle_request, ProxyState};
 use session::SessionManager;
+use stats::Stats;
 use vault::Vault;
 
 #[derive(Parser, Debug)]
@@ -141,12 +143,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Arc::new(v)
     });
 
+    let stats = Stats::new();
+
     let state = Arc::new(ProxyState {
         target_url: cfg.target.clone(),
         client: Client::new(),
         sessions: SessionManager::new(vault.clone()),
         config: cfg.clone(),
         audit_log,
+        stats: stats.clone(),
     });
 
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse()?;
@@ -163,6 +168,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if vault.is_some() {
         info!("  Vault:        {} (encrypted)", args.vault_path);
     }
+
+    // Live stats ticker
+    let stats_handle = stats.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let reqs = stats_handle.requests.load(std::sync::atomic::Ordering::Relaxed);
+            if reqs > 0 {
+                eprint!("\r\x1b[2K  📊 {}", stats_handle.display());
+            }
+        }
+    });
 
     loop {
         let (stream, remote) = listener.accept().await?;

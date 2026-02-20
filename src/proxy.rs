@@ -14,6 +14,7 @@ use crate::config::{Config, RedactAction};
 use crate::faker::Faker;
 use crate::redactor::detect;
 use crate::session::SessionManager;
+use crate::stats::Stats;
 use crate::vault::Vault;
 
 pub struct ProxyState {
@@ -22,6 +23,7 @@ pub struct ProxyState {
     pub sessions: SessionManager,
     pub config: Config,
     pub audit_log: Option<Arc<AuditLog>>,
+    pub stats: Arc<Stats>,
 }
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -60,6 +62,8 @@ pub async fn handle_request(
             return Ok(error_response(StatusCode::BAD_REQUEST, "Failed to read request body"));
         }
     };
+
+    state.stats.add_request(body_bytes.len() as u64);
 
     // Parse JSON to derive session ID, then redact with session-scoped faker
     let (redacted_body, session_faker) = if !body_bytes.is_empty() {
@@ -235,6 +239,7 @@ async fn handle_streaming_response(
 fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
     let entities = detect(text);
     let mut result = text.to_string();
+    let mut redaction_count: u64 = 0;
 
     for entity in &entities {
         let label = entity.kind.label();
@@ -249,12 +254,17 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
             RedactAction::Redact | RedactAction::Mask => {
                 let fake = faker.fake(&entity.original, &entity.kind);
                 result = result.replace(&entity.original, &fake);
+                redaction_count += 1;
             }
             RedactAction::Warn => {
                 // Logged above, don't modify
             }
             RedactAction::Ignore => {}
         }
+    }
+
+    if redaction_count > 0 {
+        state.stats.add_redactions(redaction_count);
     }
 
     result
