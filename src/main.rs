@@ -376,11 +376,29 @@ fn service_status() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|v| v.contains("8686"))
         .unwrap_or(false);
 
+    let binary_ver = env!("CARGO_PKG_VERSION");
+    let daemon_ver = {
+        let log_path = mirage_dir().join("mirage-proxy.log");
+        if let Ok(contents) = std::fs::read_to_string(log_path) {
+            contents
+                .lines()
+                .find(|l| l.contains("mirage-proxy v"))
+                .and_then(|l| {
+                    l.split('v')
+                        .nth(1)
+                        .map(|s| s.split_whitespace().next().unwrap_or("unknown").to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string())
+        } else {
+            "unknown".to_string()
+        }
+    };
+
     eprintln!();
     eprintln!("  mirage-proxy");
     eprintln!("  ─────────────────────────────");
     eprintln!(
-        "  daemon:  {}",
+        "  daemon:   {}",
         if running {
             "✓ running on :8686"
         } else {
@@ -388,13 +406,15 @@ fn service_status() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     );
     eprintln!(
-        "  filter:  {}",
+        "  filter:   {}",
         if active {
             "✓ on (LLM traffic routed through mirage)"
         } else {
             "✗ off (traffic going direct)"
         }
     );
+    eprintln!("  binary:   v{}", binary_ver);
+    eprintln!("  daemon v: v{}", daemon_ver);
     eprintln!();
     if running && !active {
         eprintln!("  Run `mirage on` or open a new terminal.");
@@ -716,10 +736,14 @@ export TOGETHER_BASE_URL="http://127.0.0.1:8686/together"
 export OPENROUTER_BASE_URL="http://127.0.0.1:8686/openrouter"
 export XAI_BASE_URL="http://127.0.0.1:8686/xai"
 
+_mirage_version() {
+  command mirage-proxy --version 2>/dev/null | awk '{print $2}'
+}
+
 # Startup message
 if [ -z "${MIRAGE_QUIET:-}" ]; then
   if curl -so /dev/null -w '%{http_code}' "http://127.0.0.1:8686/" 2>/dev/null | grep -qE '^(200|404|502)$'; then
-    echo "🛡️ mirage active"
+    echo "🛡️ mirage active (v$(_mirage_version))"
   fi
 fi
 
@@ -727,6 +751,7 @@ fi
 mirage() {
   local port="${MIRAGE_PORT:-8686}"
   local base="http://127.0.0.1:${port}"
+  local ver="$(_mirage_version)"
   case "${1:-status}" in
     on)
       if ! curl -so /dev/null -w '%{http_code}' "${base}/" 2>/dev/null | grep -qE '^(200|404|502)$'; then
@@ -744,27 +769,39 @@ mirage() {
       export TOGETHER_BASE_URL="${base}/together"
       export OPENROUTER_BASE_URL="${base}/openrouter"
       export XAI_BASE_URL="${base}/xai"
-      echo "  🛡️ mirage on — LLM traffic filtered"
+      echo "  🛡️ mirage on (v${ver}) — LLM traffic filtered"
       ;;
     off)
-      unset ANTHROPIC_BASE_URL OPENAI_BASE_URL GOOGLE_API_BASE_URL \
-            MISTRAL_API_BASE_URL DEEPSEEK_BASE_URL COHERE_API_BASE_URL \
-            GROQ_BASE_URL TOGETHER_BASE_URL OPENROUTER_BASE_URL XAI_BASE_URL
+      unset ANTHROPIC_BASE_URL OPENAI_BASE_URL GOOGLE_API_BASE_URL             MISTRAL_API_BASE_URL DEEPSEEK_BASE_URL COHERE_API_BASE_URL             GROQ_BASE_URL TOGETHER_BASE_URL OPENROUTER_BASE_URL XAI_BASE_URL
       echo "  mirage off — traffic going direct"
       ;;
+    logs)
+      local logp="$HOME/.mirage/mirage-proxy.log"
+      if [ ! -f "$logp" ]; then
+        echo "  ✗ no log file at $logp"
+        return 1
+      fi
+      echo "  tailing $logp (ctrl+c to stop)"
+      tail -f "$logp" | grep --line-buffered -E '🛡️|⚠️|📎|📊|mirage-proxy v'
+      ;;
     status)
-      local running=false active=false
+      local running=false active=false daemon_ver="unknown"
       curl -so /dev/null -w '%{http_code}' "${base}/" 2>/dev/null | grep -qE '^(200|404|502)$' && running=true
       [ -n "${ANTHROPIC_BASE_URL:-}" ] && echo "${ANTHROPIC_BASE_URL}" | grep -q "8686" && active=true
+      if [ -f "$HOME/.mirage/mirage-proxy.log" ]; then
+        daemon_ver=$(grep -m1 -E 'mirage-proxy v[0-9]' "$HOME/.mirage/mirage-proxy.log" | sed -E 's/.*v([0-9]+\.[0-9]+\.[0-9]+).*//' )
+      fi
       echo ""
       echo "  mirage-proxy"
       echo "  ─────────────────────────────"
-      if $running; then echo "  daemon:  ✓ running"; else echo "  daemon:  ✗ not running"; fi
-      if $active; then echo "  filter:  ✓ on"; else echo "  filter:  ✗ off"; fi
+      if $running; then echo "  daemon:   ✓ running"; else echo "  daemon:   ✗ not running"; fi
+      if $active; then echo "  filter:   ✓ on"; else echo "  filter:   ✗ off"; fi
+      echo "  binary:   v${ver}"
+      echo "  daemon v: v${daemon_ver}"
       echo ""
       ;;
     *)
-      echo "Usage: mirage [on|off|status]"
+      echo "Usage: mirage [on|off|status|logs]"
       ;;
   esac
 }
@@ -783,13 +820,17 @@ $env:TOGETHER_BASE_URL = "http://127.0.0.1:8686/together"
 $env:OPENROUTER_BASE_URL = "http://127.0.0.1:8686/openrouter"
 $env:XAI_BASE_URL = "http://127.0.0.1:8686/xai"
 
+function _MirageVersion {
+    try { return (mirage-proxy --version).Split(' ')[1] } catch { return "unknown" }
+}
+
 # Startup message
 if (-not $env:MIRAGE_QUIET) {
     try {
         $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8686/" -TimeoutSec 1 -UseBasicParsing -ErrorAction SilentlyContinue
-        Write-Host "🛡️ mirage active"
+        Write-Host "🛡️ mirage active (v$(_MirageVersion))"
     } catch [System.Net.WebException] {
-        if ($_.Exception.Response) { Write-Host "🛡️ mirage active" }
+        if ($_.Exception.Response) { Write-Host "🛡️ mirage active (v$(_MirageVersion))" }
     } catch {}
 }
 
@@ -798,6 +839,7 @@ function mirage {
     param([string]$Action = "status")
     $port = if ($env:MIRAGE_PORT) { $env:MIRAGE_PORT } else { "8686" }
     $base = "http://127.0.0.1:$port"
+    $ver = _MirageVersion
 
     switch ($Action) {
         "on" {
@@ -823,7 +865,7 @@ function mirage {
             $env:TOGETHER_BASE_URL = "$base/together"
             $env:OPENROUTER_BASE_URL = "$base/openrouter"
             $env:XAI_BASE_URL = "$base/xai"
-            Write-Host "  🛡️ mirage on — LLM traffic filtered"
+            Write-Host "  🛡️ mirage on (v$ver) — LLM traffic filtered"
         }
         "off" {
             Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
@@ -838,6 +880,12 @@ function mirage {
             Remove-Item Env:XAI_BASE_URL -ErrorAction SilentlyContinue
             Write-Host "  mirage off — traffic going direct"
         }
+        "logs" {
+            $log = Join-Path $HOME ".mirage/mirage-proxy.log"
+            if (-not (Test-Path $log)) { Write-Host "  ✗ no log file at $log"; return }
+            Write-Host "  tailing $log (ctrl+c to stop)"
+            Get-Content -Path $log -Wait | Select-String -Pattern "🛡️|⚠️|📎|📊|mirage-proxy v"
+        }
         "status" {
             $running = $false
             try {
@@ -847,15 +895,23 @@ function mirage {
                 if ($_.Exception.Response) { $running = $true }
             } catch {}
             $active = $env:ANTHROPIC_BASE_URL -and $env:ANTHROPIC_BASE_URL.Contains("8686")
+            $daemonVer = "unknown"
+            $log = Join-Path $HOME ".mirage/mirage-proxy.log"
+            if (Test-Path $log) {
+                $line = Select-String -Path $log -Pattern "mirage-proxy v[0-9]" | Select-Object -First 1
+                if ($line) { $daemonVer = ($line.Line -replace '.*v([0-9]+\.[0-9]+\.[0-9]+).*','$1') }
+            }
             Write-Host ""
             Write-Host "  mirage-proxy"
             Write-Host "  ─────────────────────────────"
-            if ($running) { Write-Host "  daemon:  ✓ running" } else { Write-Host "  daemon:  ✗ not running" }
-            if ($active) { Write-Host "  filter:  ✓ on" } else { Write-Host "  filter:  ✗ off" }
+            if ($running) { Write-Host "  daemon:   ✓ running" } else { Write-Host "  daemon:   ✗ not running" }
+            if ($active) { Write-Host "  filter:   ✓ on" } else { Write-Host "  filter:   ✗ off" }
+            Write-Host "  binary:   v$ver"
+            Write-Host "  daemon v: v$daemonVer"
             Write-Host ""
         }
         default {
-            Write-Host "Usage: mirage [on|off|status]"
+            Write-Host "Usage: mirage [on|off|status|logs]"
         }
     }
 }
