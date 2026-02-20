@@ -23,13 +23,13 @@ No `[REDACTED]`. No `[[PERSON_1]]`. The provider sees a completely normal reques
 ## Table of Contents
 
 - [Why this matters](#why-this-matters)
+- [Quick start](#quick-start)
 - [Install](#install)
   - [OpenClaw](#openclaw)
   - [Claude Code](#claude-code)
   - [Codex / OpenAI](#codex--openai)
   - [Cursor, Aider, Continue, OpenCode](#cursor-aider-continue-opencode)
   - [All tools — manual setup](#all-tools--manual-setup)
-  - [Wrap mode (no permanent config)](#wrap-mode-no-permanent-config)
 - [Multi-provider mode](#multi-provider-mode)
 - [Provider bypass](#provider-bypass)
 - [Live output](#live-output)
@@ -55,6 +55,31 @@ No `[REDACTED]`. No `[[PERSON_1]]`. The provider sees a completely normal reques
 On Feb 14, 2026, a critical vulnerability ([CVE-2026-21852](https://nvd.nist.gov/vuln/detail/CVE-2026-21852)) was disclosed where Claude Code could be tricked into exfiltrating API keys via prompt injection. The same week, a [Reddit post](https://www.reddit.com/r/ClaudeAI/comments/1r186gl/my_agent_stole_my_api_keys/) hit 1.7K upvotes: "My agent stole my API keys." And Anthropic's own [safety report](https://www-cdn.anthropic.com/f21d93f21602ead5cdbecb8c8e1c765759d9e232.pdf) for Opus 4.6 found the model "aggressively acquired authentication tokens" and "sent unauthorized emails without human permission" during testing.
 
 Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends your full codebase to the cloud. If there's a secret in your repo, it's in someone's training data. Mirage fixes this at the network layer, no code changes required.
+
+---
+
+## Quick start
+
+```bash
+# 1. Install
+brew install chandika/tap/mirage-proxy
+
+# 2. Run as a background service (auto-starts on boot, auto-restarts on crash)
+mirage-proxy --service-install
+
+# 3. Turn it on
+mirage on
+```
+
+That's it. Every LLM tool you launch from that terminal now routes through mirage. Claude Code, Codex, Cursor, Aider, OpenCode — all filtered.
+
+```bash
+mirage on       # LLM traffic filtered through mirage
+mirage off      # traffic goes direct — like mirage was never there
+mirage status   # check if active
+```
+
+Works like a VPN: the daemon always runs in the background, `mirage on/off` toggles whether your tools route through it. No permanent config changes to any tool. No orphaned settings pointing at a dead port.
 
 ---
 
@@ -272,30 +297,6 @@ mirage-proxy --uninstall
 ```
 
 Release details: [`docs/releasing.md`](docs/releasing.md)
-
----
-
-### Wrap mode (no permanent config)
-
-Don't want mirage to permanently modify your tool's config? Use `--wrap` — it starts the proxy, runs your command with the right env vars, and stops everything when the command exits. Nothing written to disk.
-
-```bash
-# Claude Code
-mirage-proxy --wrap "claude"
-
-# Codex
-mirage-proxy --wrap "codex"
-
-# OpenCode
-mirage-proxy --wrap "opencode"
-
-# Any command
-mirage-proxy --wrap "aider --model claude-sonnet-4-6"
-```
-
-Under the hood, `--wrap` sets `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_API_BASE_URL`, and env vars for all other supported providers to route through `localhost:8686`. When the wrapped command exits, the proxy shuts down. If the proxy is killed, the env vars disappear with it — your tool reverts to direct provider access automatically.
-
-This solves the "proxy goes down, Claude breaks" problem — if you always launch via `--wrap`, there's no orphaned config pointing at a dead port.
 
 ---
 
@@ -520,9 +521,11 @@ Options:
       --vault-key <PASSPHRASE>    Vault encryption passphrase (or MIRAGE_VAULT_KEY env)
       --vault-path <PATH>         Vault file path [default: ./mirage-vault.enc]
       --vault-flush-threshold <N> Auto-flush after N new mappings [default: 50]
-      --setup                     Auto-configure installed LLM tools
+      --setup                     Auto-configure installed LLM tools (permanent)
       --uninstall                 Remove mirage configuration from all tools
-      --wrap <COMMAND>            Run command with proxy env vars (no permanent config)
+      --service-install           Install as background service (launchd/systemd)
+      --service-uninstall         Remove background service
+      --service-status            Show daemon and filter status
       --no-update-check           Disable startup version check
       --log-level <LEVEL>         trace | debug | info | warn | error [default: info]
   -h, --help                      Print help
@@ -623,6 +626,8 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 - [x] Binary SHA256 verification in installer
 - [x] `--wrap` mode (session-scoped proxy, no permanent config)
 - [x] Provider bypass list (skip filtering for specific upstreams)
+- [x] `mirage on/off` — VPN-like shell toggle (v0.6.0)
+- [x] Background service install — launchd (macOS) / systemd (Linux) (v0.6.0)
 - [x] Cross-boundary buffer for streaming rehydration
 - [x] Argon2id vault key derivation (with legacy SHA-256 fallback)
 - [ ] Custom pattern definitions in config
