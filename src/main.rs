@@ -718,7 +718,7 @@ export XAI_BASE_URL="http://127.0.0.1:8686/xai"
 
 # Startup message
 if [ -z "${MIRAGE_QUIET:-}" ]; then
-  if curl -sf -o /dev/null -w '' "http://127.0.0.1:8686/" 2>/dev/null; then
+  if curl -so /dev/null -w '%{http_code}' "http://127.0.0.1:8686/" 2>/dev/null | grep -qE '^(200|404|502)$'; then
     echo "🛡️ mirage active"
   fi
 fi
@@ -729,7 +729,7 @@ mirage() {
   local base="http://127.0.0.1:${port}"
   case "${1:-status}" in
     on)
-      if ! curl -sf -o /dev/null -w '' "${base}/" 2>/dev/null; then
+      if ! curl -so /dev/null -w '%{http_code}' "${base}/" 2>/dev/null | grep -qE '^(200|404|502)$'; then
         echo "  ✗ mirage-proxy daemon not running on :${port}"
         echo "  Run: mirage-proxy --service-install"
         return 1
@@ -754,7 +754,7 @@ mirage() {
       ;;
     status)
       local running=false active=false
-      curl -sf -o /dev/null -w '' "${base}/" 2>/dev/null && running=true
+      curl -so /dev/null -w '%{http_code}' "${base}/" 2>/dev/null | grep -qE '^(200|404|502)$' && running=true
       [ -n "${ANTHROPIC_BASE_URL:-}" ] && echo "${ANTHROPIC_BASE_URL}" | grep -q "8686" && active=true
       echo ""
       echo "  mirage-proxy"
@@ -786,11 +786,11 @@ $env:XAI_BASE_URL = "http://127.0.0.1:8686/xai"
 # Startup message
 if (-not $env:MIRAGE_QUIET) {
     try {
-        $null = Invoke-WebRequest -Uri "http://127.0.0.1:8686/" -TimeoutSec 1 -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8686/" -TimeoutSec 1 -UseBasicParsing -ErrorAction SilentlyContinue
         Write-Host "🛡️ mirage active"
-    } catch {
-        # daemon not running — env vars set but no proxy to route through
-    }
+    } catch [System.Net.WebException] {
+        if ($_.Exception.Response) { Write-Host "🛡️ mirage active" }
+    } catch {}
 }
 
 # Toggle function
@@ -801,9 +801,14 @@ function mirage {
 
     switch ($Action) {
         "on" {
+            $daemon_up = $false
             try {
-                $null = Invoke-WebRequest -Uri "$base/" -TimeoutSec 1 -ErrorAction Stop
-            } catch {
+                $null = Invoke-WebRequest -Uri "$base/" -TimeoutSec 1 -UseBasicParsing -ErrorAction SilentlyContinue
+                $daemon_up = $true
+            } catch [System.Net.WebException] {
+                if ($_.Exception.Response) { $daemon_up = $true }
+            } catch {}
+            if (-not $daemon_up) {
                 Write-Host "  ✗ mirage-proxy daemon not running on :$port"
                 Write-Host "  Run: mirage-proxy --service-install"
                 return
@@ -836,8 +841,10 @@ function mirage {
         "status" {
             $running = $false
             try {
-                $null = Invoke-WebRequest -Uri "$base/" -TimeoutSec 1 -ErrorAction Stop
+                $null = Invoke-WebRequest -Uri "$base/" -TimeoutSec 1 -UseBasicParsing -ErrorAction SilentlyContinue
                 $running = $true
+            } catch [System.Net.WebException] {
+                if ($_.Exception.Response) { $running = $true }
             } catch {}
             $active = $env:ANTHROPIC_BASE_URL -and $env:ANTHROPIC_BASE_URL.Contains("8686")
             Write-Host ""
