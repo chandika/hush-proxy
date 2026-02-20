@@ -27,13 +27,17 @@ Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends 
 ## Install
 
 ```bash
-# Pre-built binaries (macOS, Linux)
+# Homebrew (macOS & Linux — recommended)
+brew tap chandika/tap
+brew install mirage-proxy
+
+# Pre-built binaries (macOS, Linux, Windows)
 # → https://github.com/chandika/mirage-proxy/releases
 
-# Or build from source
+# Build from source
 cargo install --git https://github.com/chandika/mirage-proxy
 
-# crates.io (currently outdated — use git install above)
+# crates.io (currently outdated — use above methods)
 # cargo install mirage-proxy
 ```
 
