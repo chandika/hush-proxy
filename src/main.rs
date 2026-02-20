@@ -1,6 +1,7 @@
 mod audit;
 mod config;
 mod faker;
+mod patterns;
 mod proxy;
 mod redactor;
 mod session;

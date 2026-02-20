@@ -70,10 +70,22 @@ static PATTERN_DEFS: &[PatternDef] = &[
 ];
 
 static COMPILED_PATTERNS: Lazy<Vec<(PiiKind, Regex)>> = Lazy::new(|| {
-    PATTERN_DEFS
+    let mut patterns: Vec<(PiiKind, Regex)> = PATTERN_DEFS
         .iter()
         .map(|p| (p.kind.clone(), Regex::new(p.pattern).unwrap()))
-        .collect()
+        .collect();
+
+    // Add extended patterns from Gitleaks + secrets-patterns-db
+    for sp in crate::patterns::SECRET_PATTERNS {
+        match Regex::new(sp.regex) {
+            Ok(re) => patterns.push((sp.kind.clone(), re)),
+            Err(e) => {
+                eprintln!("  ⚠ skipping pattern '{}': {}", sp.name, e);
+            }
+        }
+    }
+
+    patterns
 });
 
 /// Shannon entropy of a string
@@ -183,9 +195,21 @@ pub fn detect(text: &str) -> Vec<PiiEntity> {
         }
     }
 
+    // Deduplicate overlapping entities — keep the first (more specific) match
+    entities.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    let mut deduped: Vec<PiiEntity> = Vec::new();
+    for entity in entities {
+        let overlaps = deduped.iter().any(|e| {
+            entity.start < e.end && entity.end > e.start
+        });
+        if !overlaps {
+            deduped.push(entity);
+        }
+    }
+
     // Sort by start position descending for safe replacement
-    entities.sort_by(|a, b| b.start.cmp(&a.start));
-    entities
+    deduped.sort_by(|a, b| b.start.cmp(&a.start));
+    deduped
 }
 
 /// Redact all PII from text using a token map for consistency
