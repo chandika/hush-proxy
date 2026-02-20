@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::audit::AuditLog;
 use crate::config::{Config, RedactAction};
@@ -78,7 +78,7 @@ pub async fn handle_request(
                     state.stats.add_session();
                 }
                 if is_new {
-                    info!("📎 New session: {}", &session_id[..8]);
+                    eprint!("\r\x1b[2K  📎 session: {}\n", session_id);
                 }
                 redact_json_value(&mut json, &state, &faker);
                 (serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()), faker)
@@ -276,13 +276,16 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
                 let fake = faker.fake(&entity.original, &entity.kind);
                 result = result.replace(&entity.original, &fake);
                 if is_new {
-                    info!("🛡️  {} detected and masked", label);
+                    // Print above status bar: clear line, print, newline
+                    let preview = truncate_preview(&entity.original, 40);
+                    eprint!("\r\x1b[2K  🛡️  {} → {}\n", label, preview);
                     new_redaction_count += 1;
                 }
             }
             RedactAction::Warn => {
                 if is_new {
-                    info!("⚠️  {} detected (warn-only)", label);
+                    let preview = truncate_preview(&entity.original, 40);
+                    eprint!("\r\x1b[2K  ⚠️  {} (warn) → {}\n", label, preview);
                 }
             }
             RedactAction::Ignore => {}
@@ -294,6 +297,23 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
     }
 
     result
+}
+
+/// Truncate a string for display, masking the middle
+fn truncate_preview(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        // Mask middle: show first 4 and last 4 chars
+        if s.len() > 10 {
+            let start = &s[..4];
+            let end = &s[s.len()-4..];
+            format!("{}•••{}", start, end)
+        } else {
+            format!("{}•••", &s[..s.len().min(3)])
+        }
+    } else {
+        let start = &s[..4];
+        format!("{}••• [{} chars]", start, s.len())
+    }
 }
 
 /// Recursively redact PII in JSON values

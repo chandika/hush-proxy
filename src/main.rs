@@ -89,10 +89,12 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
 
+    // Default to warn — normal output uses direct stderr writes for clean TUI
+    let default_level = if args.log_level == "info" { "warn" } else { &args.log_level };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log_level)),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level)),
         )
         .init();
 
@@ -159,17 +161,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
 
-    info!("mirage-proxy v{}", env!("CARGO_PKG_VERSION"));
-    info!("  Listening:    http://{}", addr);
-    info!("  Forwarding:   {}", cfg.target);
-    info!("  Sensitivity:  {:?}", cfg.sensitivity);
-    info!("  Dry run:      {}", cfg.dry_run);
+    eprintln!();
+    eprintln!("  \x1b[1mmirage-proxy\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("  ─────────────────────────────────────");
+    eprintln!("  listen:  http://{}", addr);
+    eprintln!("  target:  {}", cfg.target);
+    eprintln!("  mode:    {}{}", if cfg.dry_run { "dry-run " } else { "" }, format!("{:?}", cfg.sensitivity).to_lowercase());
     if cfg.audit.enabled {
-        info!("  Audit log:    {}", cfg.audit.path.display());
+        eprintln!("  audit:   {}", cfg.audit.path.display());
     }
     if vault.is_some() {
-        info!("  Vault:        {} (encrypted)", args.vault_path);
+        eprintln!("  vault:   {} (encrypted)", args.vault_path);
     }
+    eprintln!("  ─────────────────────────────────────");
+    eprintln!();
 
     // Live stats ticker
     let stats_handle = stats.clone();
