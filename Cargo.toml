@@ -1,6 +1,6 @@
 [package]
 name = "mirage-proxy"
-version = "0.5.12"
+version = "0.5.13"
 edition = "2021"
 description = "Invisible sensitive data filter for LLM APIs — secrets, credentials, and PII replaced with plausible fakes"
 license = "MIT"
@@ -15,7 +15,7 @@ tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
-reqwest = { version = "0.12", features = ["stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
