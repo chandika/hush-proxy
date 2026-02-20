@@ -60,3 +60,8 @@ audit:
 
 # Dry run: log what would be redacted without actually redacting
 dry_run: false
+
+# Check GitHub releases for newer mirage-proxy versions at startup
+update_check:
+  enabled: true
+  timeout_ms: 1200      # network timeout (check runs in background)

@@ -217,7 +217,13 @@ audit:
   log_values: false     # true = log original values (for debugging only!)
 
 dry_run: false
+
+update_check:
+  enabled: true
+  timeout_ms: 1200      # network timeout (check runs in background)
 ```
+
+Update results are cached for 24h to avoid checking on every startup.
 
 ### Sensitivity levels
 
@@ -305,10 +311,13 @@ Options:
       --vault-flush-threshold <N> Auto-flush after N new mappings [default: 50]
       --setup                     Auto-configure installed LLM tools
       --uninstall                 Remove mirage configuration from all tools
+      --no-update-check           Disable startup version check
       --log-level <LEVEL>         trace | debug | info | warn | error [default: info]
   -h, --help                      Print help
   -V, --version                   Print version
 ```
+
+Set `MIRAGE_NO_UPDATE_CHECK=1` to disable update checks globally.
 
 ## How it compares
 

@@ -26,6 +26,8 @@ pub struct Config {
     pub audit: AuditConfig,
     #[serde(default)]
     pub dry_run: bool,
+    #[serde(default)]
+    pub update_check: UpdateCheckConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -73,6 +75,23 @@ pub struct AuditConfig {
     pub log_values: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateCheckConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_update_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for UpdateCheckConfig {
+    fn default() -> Self {
+        UpdateCheckConfig {
+            enabled: true,
+            timeout_ms: default_update_timeout_ms(),
+        }
+    }
+}
+
 impl Default for AuditConfig {
     fn default() -> Self {
         AuditConfig {
@@ -83,17 +102,36 @@ impl Default for AuditConfig {
     }
 }
 
-fn default_target() -> String { String::new() }
-fn default_bind() -> String { "127.0.0.1".to_string() }
-fn default_port() -> u16 { 8686 }
-fn default_sensitivity() -> Sensitivity { Sensitivity::Medium }
-fn default_true() -> bool { true }
-fn default_audit_path() -> PathBuf { PathBuf::from("./mirage-audit.jsonl") }
+fn default_target() -> String {
+    String::new()
+}
+fn default_bind() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_port() -> u16 {
+    8686
+}
+fn default_sensitivity() -> Sensitivity {
+    Sensitivity::Medium
+}
+fn default_true() -> bool {
+    true
+}
+fn default_update_timeout_ms() -> u64 {
+    1200
+}
+fn default_audit_path() -> PathBuf {
+    PathBuf::from("./mirage-audit.jsonl")
+}
 
 fn default_always_redact() -> Vec<String> {
     vec![
-        "SSN".into(), "CREDIT_CARD".into(), "PRIVATE_KEY".into(),
-        "AWS_KEY".into(), "GITHUB_TOKEN".into(), "API_KEY".into(),
+        "SSN".into(),
+        "CREDIT_CARD".into(),
+        "PRIVATE_KEY".into(),
+        "AWS_KEY".into(),
+        "GITHUB_TOKEN".into(),
+        "API_KEY".into(),
         "BEARER_TOKEN".into(),
     ]
 }
@@ -103,7 +141,11 @@ fn default_mask() -> Vec<String> {
 }
 
 fn default_warn_only() -> Vec<String> {
-    vec!["IP_ADDRESS".into(), "CONNECTION_STRING".into(), "SECRET".into()]
+    vec![
+        "IP_ADDRESS".into(),
+        "CONNECTION_STRING".into(),
+        "SECRET".into(),
+    ]
 }
 
 impl Config {
@@ -147,6 +189,7 @@ impl Config {
             blocklist: vec![],
             audit: AuditConfig::default(),
             dry_run: false,
+            update_check: UpdateCheckConfig::default(),
         }
     }
 
@@ -182,8 +225,8 @@ impl Config {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedactAction {
-    Redact,   // Replace with token [EMAIL_1_abc123]
-    Mask,     // Replace with plausible fake
-    Warn,     // Log but don't touch
-    Ignore,   // Do nothing
+    Redact, // Replace with token [EMAIL_1_abc123]
+    Mask,   // Replace with plausible fake
+    Warn,   // Log but don't touch
+    Ignore, // Do nothing
 }

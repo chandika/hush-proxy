@@ -8,6 +8,7 @@ mod redactor;
 mod session;
 mod setup;
 mod stats;
+mod update;
 mod vault;
 
 use clap::Parser;
@@ -15,8 +16,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use reqwest::Client;
-use std::net::SocketAddr;
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -89,6 +90,10 @@ struct Args {
     /// List all built-in provider routes
     #[arg(long)]
     list_providers: bool,
+
+    /// Disable automatic version update check
+    #[arg(long)]
+    no_update_check: bool,
 }
 
 #[tokio::main]
@@ -96,7 +101,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
 
     // Default to warn — normal output uses direct stderr writes for clean TUI
-    let default_level = if args.log_level == "info" { "warn" } else { &args.log_level };
+    let default_level = if args.log_level == "info" {
+        "warn"
+    } else {
+        &args.log_level
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -107,7 +116,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // List providers
     if args.list_providers {
         eprintln!();
-        eprintln!("  Built-in provider routes ({} providers)", providers::PROVIDERS.len());
+        eprintln!(
+            "  Built-in provider routes ({} providers)",
+            providers::PROVIDERS.len()
+        );
         eprintln!("  ─────────────────────────────────────────────────");
         for p in providers::PROVIDERS {
             eprintln!("  {:16} {:14} → {}", p.name, p.prefix, p.upstream);
@@ -141,6 +153,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args.dry_run {
         cfg.dry_run = true;
     }
+    if args.no_update_check {
+        cfg.update_check.enabled = false;
+    }
     if let Some(ref s) = args.sensitivity {
         cfg.sensitivity = match s.as_str() {
             "low" => config::Sensitivity::Low,
@@ -151,12 +166,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let audit_log = if cfg.audit.enabled {
-        Some(Arc::new(AuditLog::new(cfg.audit.path.clone(), cfg.audit.log_values)))
+        Some(Arc::new(AuditLog::new(
+            cfg.audit.path.clone(),
+            cfg.audit.log_values,
+        )))
     } else {
         None
     };
 
-    let vault_key = args.vault_key.or_else(|| std::env::var("MIRAGE_VAULT_KEY").ok());
+    let vault_key = args
+        .vault_key
+        .or_else(|| std::env::var("MIRAGE_VAULT_KEY").ok());
     let vault = vault_key.as_ref().map(|passphrase| {
         let key = Vault::key_from_passphrase(passphrase);
         let v = Vault::new(
@@ -183,7 +203,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(addr).await?;
 
     eprintln!();
-    eprintln!("  \x1b[1mmirage-proxy\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!(
+        "  \x1b[1mmirage-proxy\x1b[0m v{}",
+        env!("CARGO_PKG_VERSION")
+    );
     eprintln!("  ─────────────────────────────────────");
     eprintln!("  listen:  http://{}", addr);
     if cfg.target.is_empty() {
@@ -192,11 +215,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         eprintln!("           /openai    → api.openai.com");
         eprintln!("           /google    → generativelanguage.googleapis.com");
         eprintln!("           /deepseek  → api.deepseek.com");
-        eprintln!("           ... and {} more (--list-providers)", providers::PROVIDERS.len() - 4);
+        eprintln!(
+            "           ... and {} more (--list-providers)",
+            providers::PROVIDERS.len() - 4
+        );
     } else {
         eprintln!("  target:  {}", cfg.target);
     }
-    eprintln!("  mode:    {}{}", if cfg.dry_run { "dry-run " } else { "" }, format!("{:?}", cfg.sensitivity).to_lowercase());
+    eprintln!(
+        "  mode:    {}{}",
+        if cfg.dry_run { "dry-run " } else { "" },
+        format!("{:?}", cfg.sensitivity).to_lowercase()
+    );
     if cfg.audit.enabled {
         eprintln!("  audit:   {}", cfg.audit.path.display());
     }
@@ -206,13 +236,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     eprintln!("  ─────────────────────────────────────");
     eprintln!();
 
+    if cfg.update_check.enabled && !disable_update_check_from_env() {
+        let timeout_ms = cfg.update_check.timeout_ms;
+        tokio::spawn(async move {
+            if let Some(update) = update::check_for_update(timeout_ms).await {
+                eprintln!(
+                    "  update:  v{} available (current v{})",
+                    update.latest, update.current
+                );
+                eprintln!("           Update now? brew update && brew upgrade mirage-proxy");
+                eprintln!("           {}", update.release_url);
+            }
+        });
+    }
+
     // Live stats ticker
     let stats_handle = stats.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            let reqs = stats_handle.requests.load(std::sync::atomic::Ordering::Relaxed);
+            let reqs = stats_handle
+                .requests
+                .load(std::sync::atomic::Ordering::Relaxed);
             if reqs > 0 {
                 eprint!("\r\x1b[2K  📊 {}", stats_handle.display());
             }
@@ -240,5 +286,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
         });
+    }
+}
+
+fn disable_update_check_from_env() -> bool {
+    match std::env::var("MIRAGE_NO_UPDATE_CHECK") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true" || s == "yes" || s == "on"
+        }
+        Err(_) => false,
     }
 }
