@@ -29,7 +29,9 @@ No `[REDACTED]`. No `[[PERSON_1]]`. The provider sees a completely normal reques
   - [Codex / OpenAI](#codex--openai)
   - [Cursor, Aider, Continue, OpenCode](#cursor-aider-continue-opencode)
   - [All tools — manual setup](#all-tools--manual-setup)
+  - [Wrap mode (no permanent config)](#wrap-mode-no-permanent-config)
 - [Multi-provider mode](#multi-provider-mode)
+- [Provider bypass](#provider-bypass)
 - [Live output](#live-output)
 - [What it detects](#what-it-detects)
 - [Configuration](#configuration)
@@ -273,6 +275,30 @@ Release details: [`docs/releasing.md`](docs/releasing.md)
 
 ---
 
+### Wrap mode (no permanent config)
+
+Don't want mirage to permanently modify your tool's config? Use `--wrap` — it starts the proxy, runs your command with the right env vars, and stops everything when the command exits. Nothing written to disk.
+
+```bash
+# Claude Code
+mirage-proxy --wrap "claude"
+
+# Codex
+mirage-proxy --wrap "codex"
+
+# OpenCode
+mirage-proxy --wrap "opencode"
+
+# Any command
+mirage-proxy --wrap "aider --model claude-sonnet-4-6"
+```
+
+Under the hood, `--wrap` sets `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_API_BASE_URL`, and env vars for all other supported providers to route through `localhost:8686`. When the wrapped command exits, the proxy shuts down. If the proxy is killed, the env vars disappear with it — your tool reverts to direct provider access automatically.
+
+This solves the "proxy goes down, Claude breaks" problem — if you always launch via `--wrap`, there's no orphaned config pointing at a dead port.
+
+---
+
 ## Multi-provider mode
 
 Without `--target`, Mirage acts as a multi-provider proxy. Route to any provider using path prefixes:
@@ -289,6 +315,20 @@ mirage-proxy  # no --target
 # /deepseek/*   → api.deepseek.com
 # ... and 24 more (mirage-proxy --list-providers)
 ```
+
+## Provider bypass
+
+Some providers (notably Google) use TLS fingerprinting for bot detection. Since mirage terminates and re-establishes TLS connections via `reqwest`/`rustls`, the fingerprint differs from what the provider expects, which can trigger bot checks.
+
+To skip filtering for specific providers, add them to the `bypass` list in `mirage.yaml`:
+
+```yaml
+bypass:
+  - "generativelanguage.googleapis.com"
+  - "us-central1-aiplatform.googleapis.com"
+```
+
+Bypassed requests pass through unmodified — no redaction on the way out, no rehydration on the way back. Use this for providers where you trust the endpoint or where TLS fingerprinting causes issues.
 
 ## Live output
 
@@ -482,6 +522,7 @@ Options:
       --vault-flush-threshold <N> Auto-flush after N new mappings [default: 50]
       --setup                     Auto-configure installed LLM tools
       --uninstall                 Remove mirage configuration from all tools
+      --wrap <COMMAND>            Run command with proxy env vars (no permanent config)
       --no-update-check           Disable startup version check
       --log-level <LEVEL>         trace | debug | info | warn | error [default: info]
   -h, --help                      Print help
@@ -580,6 +621,8 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 - [x] Pre-built binaries for macOS, Linux, Windows
 - [x] **Native OpenClaw integration (ClawdHub skill)**
 - [x] Binary SHA256 verification in installer
+- [x] `--wrap` mode (session-scoped proxy, no permanent config)
+- [x] Provider bypass list (skip filtering for specific upstreams)
 - [x] Cross-boundary buffer for streaming rehydration
 - [x] Argon2id vault key derivation (with legacy SHA-256 fallback)
 - [ ] Custom pattern definitions in config
