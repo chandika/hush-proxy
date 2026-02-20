@@ -26,17 +26,17 @@ rules:
     - GITHUB_TOKEN
     - API_KEY
     - BEARER_TOKEN
+    - CONNECTION_STRING
+    - SECRET
 
   # Redact with plausible fakes — preserves semantic role
   mask:
     - EMAIL
     - PHONE
 
-  # Log warning but don't redact — too context-dependent
+  # Log warning but don't redact
   warn_only:
     - IP_ADDRESS
-    - CONNECTION_STRING
-    - SECRET          # high-entropy strings
 
 # Code blocks: don't redact inside ``` fenced blocks
 code_block_passthrough: false

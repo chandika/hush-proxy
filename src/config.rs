@@ -133,6 +133,8 @@ fn default_always_redact() -> Vec<String> {
         "GITHUB_TOKEN".into(),
         "API_KEY".into(),
         "BEARER_TOKEN".into(),
+        "CONNECTION_STRING".into(),
+        "SECRET".into(),
     ]
 }
 
@@ -141,11 +143,7 @@ fn default_mask() -> Vec<String> {
 }
 
 fn default_warn_only() -> Vec<String> {
-    vec![
-        "IP_ADDRESS".into(),
-        "CONNECTION_STRING".into(),
-        "SECRET".into(),
-    ]
+    vec!["IP_ADDRESS".into()]
 }
 
 impl Config {
@@ -229,4 +227,16 @@ pub enum RedactAction {
     Mask,   // Replace with plausible fake
     Warn,   // Log but don't touch
     Ignore, // Do nothing
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, RedactAction};
+
+    #[test]
+    fn defaults_redact_connection_strings_and_secrets() {
+        let cfg = Config::load(Some("this-file-does-not-exist.yaml"));
+        assert_eq!(cfg.should_redact("CONNECTION_STRING"), RedactAction::Redact);
+        assert_eq!(cfg.should_redact("SECRET"), RedactAction::Redact);
+    }
 }

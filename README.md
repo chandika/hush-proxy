@@ -305,7 +305,7 @@ Mirage shows a clean live display — no log spam, just what matters:
   📎 session: claude-sonnet-4-20250514
   🛡️  EMAIL → ops@•••e.com
   🛡️  AWS_KEY → AKIA•••MPLE
-  ⚠️  SECRET (warn) → EtUC••• [128 chars]
+  🛡️  SECRET → EtUC••• [128 chars]
   📊 1h 2m 3s │ 42 reqs │ 3 masked │ 1 sessions │ ↑2.1MB ↓890KB
 ```
 
@@ -372,13 +372,13 @@ rules:
     - GITHUB_TOKEN
     - API_KEY
     - BEARER_TOKEN
+    - CONNECTION_STRING
+    - SECRET
   mask:
     - EMAIL
     - PHONE
   warn_only:
     - IP_ADDRESS
-    - CONNECTION_STRING
-    - SECRET
 
 allowlist:
   - "192.168.1.*"
