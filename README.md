@@ -1,24 +1,28 @@
 # mirage-proxy
 
-A fast, invisible sensitive data filter for LLM APIs. Written in Rust.
+**Invisible sensitive data filter for LLM APIs.** Single Rust binary, sub-millisecond overhead.
 
 Your coding agent reads your `.env`, your codebase, your credentials — and sends all of it to the cloud. Mirage sits between your client and the provider, silently replacing sensitive data with plausible fakes. The LLM never knows. Your secrets never leave.
 
-## How it works
-
 ```
-You:     "Email sam@acme.com, key is AKIAIOSFODNN7EXAMPLE"
+You:     "Deploy key is AKIAIOSFODNN7EXAMPLE, email ops@acme.com"
          ↓
-Mirage:    "Email jordan.walker3@proton.me, key is AKIAHQ7RN2XK5M3B9Y1T"
+Mirage:  "Deploy key is AKIAHQ7RN2XK5M3B9Y1T, email jordan.walker3@proton.me"
          ↓
 Provider: (sees only fake data, responds normally)
          ↓
-Mirage:    (swaps fakes back to originals)
+Mirage:  (swaps fakes back to originals in the response)
          ↓
-You:     "Done! I've drafted the email to sam@acme.com"
+You:     "Done! I've drafted the deploy script for ops@acme.com"
 ```
 
-No `[REDACTED]`. No `[[PERSON_1]]`. No brackets. The provider sees a completely normal request with completely fake data. Responses are rehydrated transparently.
+No `[REDACTED]`. No `[[PERSON_1]]`. The provider sees a completely normal request with completely fake data. Responses are rehydrated transparently.
+
+## Why this matters
+
+On Feb 14, 2026, a critical vulnerability ([CVE-2026-21852](https://nvd.nist.gov/vuln/detail/CVE-2026-21852)) was disclosed where Claude Code could be tricked into exfiltrating API keys via prompt injection. The same week, a [Reddit post](https://old.reddit.com/r/ClaudeAI/comments/1ioytnf/my_agent_stole_my_api_keys/) hit 1.7K upvotes: "My agent stole my API keys."
+
+Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends your full codebase to the cloud. If there's a secret in your repo, it's in someone's training data. Mirage fixes this at the network layer, no code changes required.
 
 ## Install
 
@@ -26,89 +30,120 @@ No `[REDACTED]`. No `[[PERSON_1]]`. No brackets. The provider sees a completely 
 cargo install mirage-proxy
 ```
 
-Or build from source:
-
-```bash
-git clone https://github.com/chandika/mirage-proxy
-cd mirage-proxy
-cargo build --release
-```
+Pre-built binaries: see [Releases](https://github.com/chandika/mirage-proxy/releases).
 
 ## Quick start
 
-```bash
-# Point mirage at your LLM provider
-mirage-proxy --target https://api.openai.com
+### Auto-setup (recommended)
 
-# Your client talks to localhost:8686 instead
-export OPENAI_BASE_URL=http://localhost:8686
+```bash
+mirage-proxy --setup
 ```
 
-### Claude Code
+Scans for installed LLM tools (Claude Code, Cursor, Codex, Aider) and configures them to route through Mirage automatically. Edits config files, sets environment variables, done.
 
+To undo: `mirage-proxy --uninstall`
+
+### Manual setup
+
+```bash
+# 1. Start mirage, pointing at your provider
+mirage-proxy --target https://api.anthropic.com
+
+# 2. Point your tool at mirage (localhost:8686)
+export ANTHROPIC_BASE_URL=http://localhost:8686
+```
+
+### Per-tool examples
+
+**Claude Code:**
 ```bash
 mirage-proxy --target https://api.anthropic.com
-# Set ANTHROPIC_BASE_URL=http://localhost:8686 in your environment
+# Auto-configured by --setup, or manually:
+# ~/.claude/settings.json → { "env": { "ANTHROPIC_BASE_URL": "http://localhost:8686" } }
 ```
 
-### Codex / GPT
-
+**Codex / OpenAI:**
 ```bash
 mirage-proxy --target https://api.openai.com
 export OPENAI_BASE_URL=http://localhost:8686
 ```
 
-### Cursor / Continue / Aider / OpenCode
-
+**Cursor / Continue / Aider / OpenCode:**
 Point the provider base URL to `http://localhost:8686`. Everything else works as before.
 
-## What makes this different
+## Live output
 
-**Invisible substitution.** Most PII tools replace sensitive data with ugly tokens like `[EMAIL_1]` or `<REDACTED>`. The LLM sees these, knows data was removed, and produces worse output. Mirage replaces PII with plausible fakes that match the format and length of the original. The LLM has no idea redaction happened.
+Mirage shows a clean live display — no log spam, just what matters:
 
-**Session-aware consistency.** Within a conversation, the same email always maps to the same fake. Across conversations, the same email maps to different fakes. History messages stay consistent — if `sam@acme.com` became `jordan.walker3@proton.me` in message 1, it stays that way through message 50.
+```
+  mirage-proxy v0.3.0
+  ─────────────────────────────────────
+  listen:  http://127.0.0.1:8686
+  target:  https://api.anthropic.com
+  mode:    medium
+  audit:   ./mirage-audit.jsonl
+  ─────────────────────────────────────
 
-**Encrypted vault.** Mappings persist across restarts in an AES-256-GCM encrypted file. You hold the key. The vault file is useless without it.
+  📎 session: claude-sonnet-4-20250514
+  🛡️  EMAIL → ops@•••e.com
+  🛡️  AWS_KEY → AKIA•••MPLE
+  ⚠️  SECRET (warn) → EtUC••• [128 chars]
+  📊 1h 2m 3s │ 42 reqs │ 3 masked │ 1 sessions │ ↑2.1MB ↓890KB
+```
 
-**Sub-millisecond overhead.** Pure Rust, pattern-based detection. No ML models, no Docker, no Python, no 500MB spaCy download. A single static binary under 5MB.
+- **New detections** print once and scroll up
+- **Stats bar** updates in-place at the bottom
+- Each unique PII value is only counted **once** — conversation history resends don't inflate numbers
+- `--log-level debug` for verbose per-request logging
 
-## What it catches
+## What it detects
 
-### Secrets & credentials
-- AWS keys (`AKIA...`)
-- GitHub tokens (`ghp_...`, `ghs_...`)
-- OpenAI / API keys (`sk-...`, `sk-proj-...`)
-- Slack tokens (`xoxb-...`, `xoxp-...`)
-- Google API keys (`AIza...`)
-- Bearer tokens
-- Connection strings (Postgres, MySQL, MongoDB, Redis)
-- PEM private keys (RSA, EC, DSA, OpenSSH)
-- High-entropy strings (Shannon entropy scanner catches unknown secret formats)
+### Secrets & credentials (always redacted)
 
-### Personal data
-- Email addresses
-- Phone numbers (US/international, all common formats)
-- Social Security Numbers
-- Credit card numbers (Visa, MC, Amex, Discover)
-- IP addresses
+| Type | Example | Detection |
+|---|---|---|
+| AWS Access Keys | `AKIAIOSFODNN7EXAMPLE` | Prefix `AKIA`, `ASIA`, `ABIA`, `ACCA` |
+| GitHub Tokens | `ghp_xxxxxxxxxxxx` | Prefix `ghp_`, `ghs_`, `gho_`, `ghu_`, `ghr_` |
+| OpenAI API Keys | `sk-proj-abc123...` | Prefix `sk-proj-`, `sk-ant-` |
+| Google API Keys | `AIzaSyA...` | Prefix `AIza` |
+| GitLab Tokens | `glpat-xxxx` | Prefix `glpat-` |
+| Slack Tokens | `xoxb-xxx`, `xoxp-xxx` | Prefix `xoxb-`, `xoxp-`, `xoxs-` |
+| Stripe Keys | `sk_live_xxx`, `pk_live_xxx` | Prefix `sk_live_`, `sk_test_`, `rk_live_` |
+| Bearer Tokens | `Authorization: Bearer xxx` | Pattern match |
+| PEM Private Keys | `-----BEGIN RSA PRIVATE KEY-----` | Structural |
+| Connection Strings | `postgres://user:pass@host/db` | URI scheme + credentials |
+| High-entropy strings | Unknown format secrets | Shannon entropy > threshold |
 
-Every detected value is replaced with a format-matching fake:
+### Personal data (masked with plausible fakes)
 
-| Original | Fake |
-|---|---|
-| `sam@acme.com` | `jordan.walker3@proton.me` |
-| `(555) 123-4567` | `(237) 153-1071` |
-| `AKIAIOSFODNN7EXAMPLE` | `AKIAHQ7RN2XK5M3B9Y1T` |
-| `sk-proj-abc123def456...` | `sk-proj-hR4kM9nQ2wX7...` |
-| `postgres://user:pass@host/db` | `postgres://alex:kR4m9Q2w@db37.internal:5432/app_12` |
-| `123-45-6789` | `537-28-4071` |
+| Type | Original | Fake |
+|---|---|---|
+| Email | `sam@acme.com` | `jordan.walker3@proton.me` |
+| Phone (intl) | `+1-555-123-4567` | `+1-237-153-1071` |
+| Phone (US) | `(555) 123-4567` | `(237) 153-1071` |
+| SSN | `123-45-6789` | `537-28-4071` |
+| Credit Card | `4111 1111 1111 1111` | `4532 7891 2345 6178` |
+| IP Address | `10.0.1.42` | `172.18.3.97` |
+
+### How fakes work
+
+Every fake **matches the format and length** of the original:
+- An email becomes a different plausible email with a matching-length domain
+- An AWS key becomes a different valid-format AWS key
+- A phone number keeps its country code and formatting
+- A credit card keeps its issuer prefix and passes Luhn validation
+
+**Session consistency:** Within a conversation, `sam@acme.com` always maps to the same fake. The LLM's context stays coherent. Different conversations get different fakes.
 
 ## Configuration
 
-Mirage works with zero config. For fine-tuning, create a `mirage.yaml`:
+Works with zero config. For fine-tuning, create `mirage.yaml`:
 
 ```yaml
-target: "https://api.openai.com"
+target: "https://api.anthropic.com"
+port: 8686
+bind: "127.0.0.1"
 sensitivity: medium   # low | medium | high | paranoid
 
 rules:
@@ -127,72 +162,94 @@ rules:
     - EMAIL
     - PHONE
 
-  # Log but don't touch (too context-dependent)
+  # Log but don't modify (too context-dependent)
   warn_only:
     - IP_ADDRESS
     - CONNECTION_STRING
     - SECRET
 
-# Never redact these values
+# Never redact these patterns
 allowlist:
   - "192.168.1.*"
   - "sk-test-*"
+  - "localhost"
 
 audit:
   enabled: true
   path: "./mirage-audit.jsonl"
+  log_values: false     # true = log original values (for debugging only!)
 
 dry_run: false
 ```
 
 ### Sensitivity levels
 
-| Level | Behavior |
+| Level | What gets filtered |
 |---|---|
-| `low` | Only `always_redact` categories |
-| `medium` | `always_redact` + `mask` (default) |
-| `high` | Everything including `warn_only` |
-| `paranoid` | Redact all detected PII regardless of category |
+| `low` | Only `always_redact` (secrets, keys, credentials) |
+| `medium` | Secrets + PII masking (email, phone) — **default** |
+| `high` | Everything including `warn_only` categories |
+| `paranoid` | All detected PII regardless of category rules |
+
+## Sessions
+
+Mirage groups requests into **sessions** by model name. Claude Code typically creates 1-2 sessions (e.g., `claude-sonnet-4-20250514` + `claude-haiku-3.5`).
+
+Within a session:
+- Same PII → same fake (conversation stays coherent)
+- Dedup: PII in conversation history isn't re-counted
+- Audit log only records first occurrence
+
+For explicit session control, add `"mirage_session": "my-session-id"` to request bodies.
 
 ## Encrypted vault
 
-Mappings persist across restarts so your conversations stay consistent:
+Persist mappings across restarts so conversations stay consistent:
 
 ```bash
-# With vault (encrypted persistence)
-mirage-proxy --target https://api.openai.com --vault-key "my-passphrase"
+# With passphrase
+mirage-proxy --target https://api.anthropic.com --vault-key "my-passphrase"
 
-# Or via environment variable
-MIRAGE_VAULT_KEY="my-passphrase" mirage-proxy --target https://api.openai.com
+# Via environment variable
+MIRAGE_VAULT_KEY="my-passphrase" mirage-proxy --target https://api.anthropic.com
 ```
 
-The vault file (`mirage-vault.enc`) is AES-256-GCM encrypted. Without the passphrase, it's random bytes. Mappings are scoped per conversation session.
+The vault file (`mirage-vault.enc`) uses AES-256-GCM encryption. Without the passphrase, it's random bytes. Mappings are scoped per session.
 
 Without `--vault-key`, mappings live in memory only and reset on restart.
 
 ## Dry run
 
-See what would be redacted without actually changing anything:
+See what would be caught without modifying traffic:
 
 ```bash
-mirage-proxy --target https://api.openai.com --dry-run
+mirage-proxy --target https://api.anthropic.com --dry-run
 ```
 
-Requests pass through unmodified. Detections are logged to the audit file. Use this to tune your config before going live.
+Requests pass through unmodified. Detections are still logged to the audit file and shown in the live display. Use this to verify detection accuracy before going live.
 
 ## Audit log
 
-Every detection is logged to `mirage-audit.jsonl`:
+Every **new** detection is logged to `mirage-audit.jsonl`:
 
 ```json
-{"timestamp":"2026-02-19T14:30:00Z","kind":"EMAIL","action":"masked","confidence":1.0,"value_hash":"a3b2c1...","context_snippet":"Email sam@... about the deal"}
+{
+  "timestamp": "2026-02-20T02:00:17Z",
+  "kind": "EMAIL",
+  "action": "masked",
+  "confidence": 1.0,
+  "value_hash": "d8a94b5c...",
+  "context_snippet": "can you email chan@..."
+}
 ```
 
-Original values are never logged by default. Enable `audit.log_values: true` only for debugging.
+- Values are hashed (MD5) by default — original values never stored unless `audit.log_values: true`
+- Only first occurrence per proxy lifetime is logged (no duplicates from conversation history)
+- Use `value_hash` to correlate detections across sessions
 
 ## Streaming
 
-Full SSE streaming support. Mirage handles `text/event-stream` responses from providers, rehydrating fakes in real-time as chunks arrive.
+Full SSE streaming support. Mirage handles `text/event-stream` responses from providers (Claude, OpenAI, etc.), rehydrating fakes in real-time as chunks arrive. No buffering delays.
 
 ## CLI reference
 
@@ -200,52 +257,109 @@ Full SSE streaming support. Mirage handles `text/event-stream` responses from pr
 mirage-proxy [OPTIONS]
 
 Options:
-  -t, --target <URL>              Target LLM API base URL (required)
+  -t, --target <URL>              Target LLM API base URL
   -p, --port <PORT>               Listen port [default: 8686]
   -b, --bind <ADDR>               Bind address [default: 127.0.0.1]
   -c, --config <PATH>             Config file path
+      --sensitivity <LEVEL>       low | medium | high | paranoid
+      --dry-run                   Log detections without modifying traffic
       --vault-key <PASSPHRASE>    Vault encryption passphrase (or MIRAGE_VAULT_KEY env)
       --vault-path <PATH>         Vault file path [default: ./mirage-vault.enc]
       --vault-flush-threshold <N> Auto-flush after N new mappings [default: 50]
-      --dry-run                   Log detections without redacting
-      --sensitivity <LEVEL>       low | medium | high | paranoid
+      --setup                     Auto-configure installed LLM tools
+      --uninstall                 Remove mirage configuration from all tools
       --log-level <LEVEL>         trace | debug | info | warn | error [default: info]
   -h, --help                      Print help
   -V, --version                   Print version
 ```
 
-## Why not PasteGuard / LLM Guard / Presidio?
+## How it compares
 
 | | mirage-proxy | PasteGuard | LLM Guard | LiteLLM+Presidio |
 |---|---|---|---|---|
-| Install | `cargo install` | Docker | pip + models | pip + Docker + spaCy |
+| Install | `cargo install` | Docker + npm | pip + models | pip + Docker + spaCy |
 | Binary size | ~5MB | ~500MB+ | ~2GB+ | ~500MB+ |
 | Overhead | <1ms | 10-50ms | 50-200ms | 10-50ms |
 | Substitution | Plausible fakes | `[[PERSON_1]]` tokens | `[REDACTED]` | `<PERSON>` tokens |
 | LLM knows? | No | Yes | Yes | Yes |
 | Session-aware | Yes | No | No | No |
 | Encrypted vault | Yes | No | No | No |
-| Rehydration | Yes | Yes | No | No |
+| Rehydration | Yes | Yes | No | Partial |
 | Streaming | Yes | Yes | No | Partial |
-| Dependencies | None | Node + Presidio | Python + ML models | Python + spaCy + Docker |
+| Dedup | Yes | No | No | No |
+| Auto-setup | Yes | No | No | No |
+
+The key difference: other tools use **visible tokens** that tell the LLM data was removed. The LLM adapts its behavior — it might refuse to write code involving `[[PERSON_1]]`, or generate awkward workarounds. Mirage's fakes are **invisible** — the LLM processes the request normally because it looks normal.
+
+## Architecture
+
+```
+┌─────────────┐     ┌─────────────────────────────────────────┐     ┌──────────────┐
+│  LLM Client │────▶│              mirage-proxy                │────▶│ LLM Provider │
+│ (Claude Code│     │                                         │     │ (Anthropic,  │
+│  Cursor,    │◀────│  Request:  detect PII → fake → forward  │◀────│  OpenAI,     │
+│  Codex)     │     │  Response: detect fakes → rehydrate     │     │  etc.)       │
+└─────────────┘     │                                         │     └──────────────┘
+                    │  ┌─────────┐ ┌────────┐ ┌───────────┐  │
+                    │  │Redactor │ │ Faker  │ │  Session   │  │
+                    │  │(detect) │ │(fakes) │ │ (mapping)  │  │
+                    │  └─────────┘ └────────┘ └───────────┘  │
+                    │  ┌─────────┐ ┌────────┐ ┌───────────┐  │
+                    │  │ Audit   │ │ Vault  │ │  Config    │  │
+                    │  │ (log)   │ │(crypt) │ │  (rules)   │  │
+                    │  └─────────┘ └────────┘ └───────────┘  │
+                    └─────────────────────────────────────────┘
+```
+
+**Request path:** Client → Mirage parses JSON → detects PII via regex + entropy → generates format-matching fakes → stores original↔fake mapping in session → forwards redacted request to provider.
+
+**Response path:** Provider responds → Mirage scans for fake values → replaces fakes with originals (rehydration) → returns clean response to client. Works for both regular JSON responses and SSE streams.
+
+## Building from source
+
+```bash
+git clone https://github.com/chandika/mirage-proxy
+cd mirage-proxy
+cargo build --release
+# Binary at target/release/mirage-proxy
+```
+
+Requires Rust 1.75+. No other dependencies.
+
+## Detection sources
+
+Pattern detection draws from two open-source databases:
+- [Gitleaks](https://github.com/gitleaks/gitleaks) (MIT) — prefix-based secret patterns
+- [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) (Apache 2.0) — comprehensive pattern database
+
+Only high-confidence, low-false-positive patterns are included. Generic "keyword near random string" patterns are excluded to avoid breaking legitimate code.
 
 ## Roadmap
 
-- [x] Pattern + entropy detection
+- [x] Pattern + entropy detection (11 PII types)
 - [x] Invisible plausible fake substitution
-- [x] Session-scoped consistency
-- [x] Encrypted vault persistence
-- [x] Streaming rehydration
-- [x] Audit log + dry-run
+- [x] Session-scoped consistency with dedup
+- [x] Encrypted vault persistence (AES-256-GCM)
+- [x] SSE streaming rehydration
+- [x] Audit log + dry-run mode
 - [x] YAML config with sensitivity levels
-- [ ] Custom pattern definitions
+- [x] Auto-setup for Claude Code, Cursor, Codex, Aider
+- [x] Live TUI with in-place stats
+- [x] International phone number support
+- [ ] Extended secret patterns (Gitleaks + secrets-patterns-db)
+- [ ] Custom pattern definitions in config
 - [ ] Allowlist/blocklist glob matching
-- [ ] Optional ONNX NER for name/org detection
-- [ ] Multi-provider native format support (Anthropic Messages API)
-- [ ] Route mode (sensitive requests → local Ollama)
-- [ ] npm/brew/scoop distribution
-- [ ] Pre-built binaries for all platforms
+- [ ] Optional ONNX NER for name/organization detection
+- [ ] Route mode (sensitive requests → local model)
+- [ ] Homebrew / npm / scoop distribution
+- [ ] Pre-built binaries for macOS, Linux, Windows
 
 ## License
 
 MIT
+
+## Credits
+
+Built by [@chandika](https://x.com/chandika). Born from the frustration of watching coding agents send API keys to the cloud.
+
+Pattern detection inspired by [Gitleaks](https://github.com/gitleaks/gitleaks) and [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db).
