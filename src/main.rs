@@ -95,14 +95,17 @@ struct Args {
     #[arg(long)]
     no_update_check: bool,
 
-    /// Wrap a command: start proxy, run command with proxy env vars, stop on exit.
-    /// No permanent config changes. Example: mirage-proxy --wrap "claude"
-    #[arg(long, value_name = "COMMAND")]
-    wrap: Option<String>,
+    /// Install mirage as a system service (launchd on macOS, systemd on Linux)
+    #[arg(long)]
+    service_install: bool,
 
-    /// Extra args to pass to the wrapped command
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    wrap_args: Vec<String>,
+    /// Uninstall mirage system service
+    #[arg(long)]
+    service_uninstall: bool,
+
+    /// Show service status
+    #[arg(long)]
+    service_status: bool,
 }
 
 #[tokio::main]
@@ -147,9 +150,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
-    // Handle --wrap mode: start proxy, run command, stop on exit
-    if let Some(ref wrap_cmd) = args.wrap {
-        return run_wrap_mode(&args, wrap_cmd).await;
+    // Handle service commands
+    if args.service_install {
+        return service_install(&args);
+    }
+    if args.service_uninstall {
+        return service_uninstall();
+    }
+    if args.service_status {
+        return service_status();
     }
 
     // Load config, then override with CLI args
@@ -315,128 +324,348 @@ fn disable_update_check_from_env() -> bool {
     }
 }
 
-/// Wrap mode: start proxy in background, run a command with proxy env vars, stop on exit.
-/// Nothing is written to disk. When the child exits, the proxy stops.
-async fn run_wrap_mode(args: &Args, cmd: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::process::Stdio;
-    use tokio::signal;
+// ─── Service management ───────────────────────────────────────────────
+
+fn mirage_dir() -> std::path::PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".mirage")
+}
+
+fn service_install(args: &Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let exe = std::env::current_exe()?;
+    let exe_str = exe.to_string_lossy();
+    let mirage_home = mirage_dir();
+    std::fs::create_dir_all(&mirage_home)?;
 
     let port = args.port.unwrap_or(8686);
-    let bind = args.bind.as_deref().unwrap_or("127.0.0.1");
-    let base = format!("http://{}:{}", bind, port);
 
-    // Build the proxy args (reuse current binary)
-    let exe = std::env::current_exe()?;
-    let mut proxy_args = vec![
-        "--port".to_string(), port.to_string(),
-        "--bind".to_string(), bind.to_string(),
-    ];
-    if let Some(ref target) = args.target {
-        proxy_args.push("--target".to_string());
-        proxy_args.push(target.clone());
-    }
-    if let Some(ref config) = args.config {
-        proxy_args.push("--config".to_string());
-        proxy_args.push(config.clone());
-    }
-    if let Some(ref sensitivity) = args.sensitivity {
-        proxy_args.push("--sensitivity".to_string());
-        proxy_args.push(sensitivity.clone());
-    }
-    if let Some(ref vault_key) = args.vault_key {
-        proxy_args.push("--vault-key".to_string());
-        proxy_args.push(vault_key.clone());
-    }
-    if args.dry_run {
-        proxy_args.push("--dry-run".to_string());
-    }
-    proxy_args.push("--no-update-check".to_string());
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = dirs_next::home_dir()
+            .unwrap()
+            .join("Library/LaunchAgents/com.mirage-proxy.plist");
 
-    // Start the proxy as a child process
-    eprintln!("  🔄 Starting mirage-proxy on :{} ...", port);
-    let mut proxy_proc = tokio::process::Command::new(&exe)
-        .args(&proxy_args)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mirage-proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>--port</string>
+        <string>{port}</string>
+        <string>--no-update-check</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{home}/mirage-proxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>{home}/mirage-proxy.log</string>
+    <key>WorkingDirectory</key>
+    <string>{home}</string>
+</dict>
+</plist>"#,
+            exe = exe_str,
+            port = port,
+            home = mirage_home.to_string_lossy(),
+        );
 
-    // Wait for proxy to be ready (poll health endpoint)
-    let client = reqwest::Client::new();
-    let health_url = format!("{}/", base);
-    let mut ready = false;
-    for _ in 0..30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-        if let Ok(resp) = client.get(&health_url).send().await {
-            let status = resp.status().as_u16();
-            // 502 or 404 means proxy is running (no matching route, which is expected)
-            if status == 502 || status == 404 || status == 200 {
-                ready = true;
-                break;
+        std::fs::write(&plist_path, &plist)?;
+
+        // Load the service
+        let status = std::process::Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(&plist_path)
+            .status()?;
+
+        if status.success() {
+            eprintln!("  ✓ Installed launchd service");
+            eprintln!("    Plist: {}", plist_path.display());
+            eprintln!("    Log:   {}/mirage-proxy.log", mirage_home.display());
+        } else {
+            eprintln!("  ✗ Failed to load launchd service");
+            return Ok(());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let unit_dir = dirs_next::home_dir()
+            .unwrap()
+            .join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir)?;
+        let unit_path = unit_dir.join("mirage-proxy.service");
+
+        let unit = format!(r#"[Unit]
+Description=mirage-proxy — invisible secrets filter for LLM APIs
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={exe} --port {port} --no-update-check
+WorkingDirectory={home}
+Restart=always
+RestartSec=2
+StandardOutput=append:{home}/mirage-proxy.log
+StandardError=append:{home}/mirage-proxy.log
+
+[Install]
+WantedBy=default.target
+"#,
+            exe = exe_str,
+            port = port,
+            home = mirage_home.to_string_lossy(),
+        );
+
+        std::fs::write(&unit_path, &unit)?;
+
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", "mirage-proxy"])
+            .status()?;
+
+        if status.success() {
+            eprintln!("  ✓ Installed systemd user service");
+            eprintln!("    Unit: {}", unit_path.display());
+            eprintln!("    Log:  {}/mirage-proxy.log", mirage_home.display());
+        } else {
+            eprintln!("  ✗ Failed to enable systemd service");
+            return Ok(());
+        }
+    }
+
+    // Install the shell function
+    install_shell_function(port)?;
+
+    eprintln!();
+    eprintln!("  🛡️  mirage-proxy is running on :{}", port);
+    eprintln!();
+    eprintln!("  Usage:");
+    eprintln!("    mirage on       # route LLM traffic through mirage");
+    eprintln!("    mirage off      # go direct");
+    eprintln!("    mirage status   # check if active");
+    eprintln!();
+    eprintln!("  Restart your shell or run: source ~/.zshrc");
+
+    Ok(())
+}
+
+fn service_uninstall() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = dirs_next::home_dir()
+            .unwrap()
+            .join("Library/LaunchAgents/com.mirage-proxy.plist");
+
+        if plist_path.exists() {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", "-w"])
+                .arg(&plist_path)
+                .status();
+            std::fs::remove_file(&plist_path)?;
+            eprintln!("  ✓ Removed launchd service");
+        } else {
+            eprintln!("  ⚠ No launchd service found");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", "--now", "mirage-proxy"])
+            .status();
+
+        let unit_path = dirs_next::home_dir()
+            .unwrap()
+            .join(".config/systemd/user/mirage-proxy.service");
+        if unit_path.exists() {
+            std::fs::remove_file(&unit_path)?;
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+            eprintln!("  ✓ Removed systemd service");
+        } else {
+            eprintln!("  ⚠ No systemd service found");
+        }
+    }
+
+    // Remove shell function
+    remove_shell_function()?;
+
+    eprintln!("  ✓ Done. Restart your shell to complete removal.");
+    Ok(())
+}
+
+fn service_status() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Check if daemon is running
+    let running = match std::net::TcpStream::connect("127.0.0.1:8686") {
+        Ok(_) => true,
+        Err(_) => false,
+    };
+
+    // Check if env vars are set (i.e., mirage on)
+    let active = std::env::var("ANTHROPIC_BASE_URL")
+        .map(|v| v.contains("8686"))
+        .unwrap_or(false);
+
+    eprintln!();
+    eprintln!("  mirage-proxy status");
+    eprintln!("  ─────────────────────────────────────");
+    eprintln!("  daemon:  {}", if running { "✓ running on :8686" } else { "✗ not running" });
+    eprintln!("  filter:  {}", if active { "✓ on (traffic routing through mirage)" } else { "✗ off (traffic going direct)" });
+    eprintln!();
+    if running && !active {
+        eprintln!("  Run `mirage on` to start filtering.");
+    } else if !running {
+        eprintln!("  Run `mirage-proxy --service-install` to start the daemon.");
+    }
+
+    Ok(())
+}
+
+// ─── Shell function installer ─────────────────────────────────────────
+
+const SHELL_FUNCTION: &str = r#"
+# mirage-proxy: invisible secrets filter for LLM APIs
+# https://github.com/chandika/mirage-proxy
+mirage() {
+  local port="${MIRAGE_PORT:-8686}"
+  local base="http://127.0.0.1:${port}"
+  case "${1:-status}" in
+    on)
+      # Check daemon is running
+      if ! curl -sf -o /dev/null -w '' "${base}/" 2>/dev/null; then
+        echo "  ✗ mirage-proxy daemon not running on :${port}"
+        echo "  Run: mirage-proxy --service-install"
+        return 1
+      fi
+      export ANTHROPIC_BASE_URL="${base}/anthropic"
+      export OPENAI_BASE_URL="${base}"
+      export GOOGLE_API_BASE_URL="${base}/google"
+      export MISTRAL_API_BASE_URL="${base}/mistral"
+      export DEEPSEEK_BASE_URL="${base}/deepseek"
+      export COHERE_API_BASE_URL="${base}/cohere"
+      export GROQ_BASE_URL="${base}/groq"
+      export TOGETHER_BASE_URL="${base}/together"
+      export OPENROUTER_BASE_URL="${base}/openrouter"
+      export XAI_BASE_URL="${base}/xai"
+      echo "  🛡️  mirage on — LLM traffic now filtered"
+      ;;
+    off)
+      unset ANTHROPIC_BASE_URL OPENAI_BASE_URL GOOGLE_API_BASE_URL \
+            MISTRAL_API_BASE_URL DEEPSEEK_BASE_URL COHERE_API_BASE_URL \
+            GROQ_BASE_URL TOGETHER_BASE_URL OPENROUTER_BASE_URL XAI_BASE_URL
+      echo "  mirage off — traffic going direct"
+      ;;
+    status)
+      local running=false active=false
+      curl -sf -o /dev/null -w '' "${base}/" 2>/dev/null && running=true
+      [ -n "${ANTHROPIC_BASE_URL:-}" ] && [[ "${ANTHROPIC_BASE_URL}" == *"8686"* ]] && active=true
+      echo ""
+      echo "  mirage-proxy"
+      echo "  ─────────────────────────────"
+      if $running; then echo "  daemon:  ✓ running"; else echo "  daemon:  ✗ not running"; fi
+      if $active; then echo "  filter:  ✓ on"; else echo "  filter:  ✗ off"; fi
+      echo ""
+      ;;
+    *)
+      echo "Usage: mirage [on|off|status]"
+      ;;
+  esac
+}
+"#;
+
+const SHELL_MARKER_START: &str = "# >>> mirage-proxy >>>";
+const SHELL_MARKER_END: &str = "# <<< mirage-proxy <<<";
+
+fn install_shell_function(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let home = dirs_next::home_dir().unwrap();
+
+    // Detect shell RC files
+    let rc_files: Vec<std::path::PathBuf> = vec![
+        home.join(".zshrc"),
+        home.join(".bashrc"),
+    ]
+    .into_iter()
+    .filter(|p| p.exists())
+    .collect();
+
+    if rc_files.is_empty() {
+        // Create .zshrc if nothing exists
+        let zshrc = home.join(".zshrc");
+        std::fs::write(&zshrc, "")?;
+        write_shell_block(&zshrc, port)?;
+        eprintln!("  ✓ Created ~/.zshrc with mirage shell function");
+        return Ok(());
+    }
+
+    for rc in &rc_files {
+        write_shell_block(rc, port)?;
+        eprintln!("  ✓ Added mirage shell function to {}", rc.display());
+    }
+
+    Ok(())
+}
+
+fn write_shell_block(path: &std::path::Path, _port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let contents = std::fs::read_to_string(path).unwrap_or_default();
+
+    // Remove existing block if present
+    let cleaned = remove_shell_block(&contents);
+
+    let new_contents = format!(
+        "{}\n{}\n{}\n{}\n",
+        cleaned.trim_end(),
+        SHELL_MARKER_START,
+        SHELL_FUNCTION.trim(),
+        SHELL_MARKER_END,
+    );
+
+    std::fs::write(path, new_contents)?;
+    Ok(())
+}
+
+fn remove_shell_block(contents: &str) -> String {
+    let mut result = String::new();
+    let mut in_block = false;
+    for line in contents.lines() {
+        if line.trim() == SHELL_MARKER_START {
+            in_block = true;
+            continue;
+        }
+        if line.trim() == SHELL_MARKER_END {
+            in_block = false;
+            continue;
+        }
+        if !in_block {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
+fn remove_shell_function() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let home = dirs_next::home_dir().unwrap();
+    for name in &[".zshrc", ".bashrc"] {
+        let path = home.join(name);
+        if path.exists() {
+            let contents = std::fs::read_to_string(&path)?;
+            if contents.contains(SHELL_MARKER_START) {
+                let cleaned = remove_shell_block(&contents);
+                std::fs::write(&path, cleaned)?;
+                eprintln!("  ✓ Removed mirage shell function from {}", path.display());
             }
         }
     }
-
-    if !ready {
-        eprintln!("  ✗ mirage-proxy failed to start within 6 seconds");
-        proxy_proc.kill().await.ok();
-        std::process::exit(1);
-    }
-
-    eprintln!("  ✓ Proxy ready");
-    eprintln!();
-
-    // Build env vars for the child — set all known base URLs to point at proxy
-    let env_vars: Vec<(&str, String)> = vec![
-        ("ANTHROPIC_BASE_URL", format!("{}/anthropic", base)),
-        ("OPENAI_BASE_URL", base.clone()),
-        ("GOOGLE_API_BASE_URL", format!("{}/google", base)),
-        ("MISTRAL_API_BASE_URL", format!("{}/mistral", base)),
-        ("DEEPSEEK_BASE_URL", format!("{}/deepseek", base)),
-        ("COHERE_API_BASE_URL", format!("{}/cohere", base)),
-        ("GROQ_BASE_URL", format!("{}/groq", base)),
-        ("TOGETHER_BASE_URL", format!("{}/together", base)),
-        ("OPENROUTER_BASE_URL", format!("{}/openrouter", base)),
-        ("XAI_BASE_URL", format!("{}/xai", base)),
-    ];
-
-    // Parse the command — split on spaces (simple), or use shell
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let full_cmd = if args.wrap_args.is_empty() {
-        cmd.to_string()
-    } else {
-        format!("{} {}", cmd, args.wrap_args.join(" "))
-    };
-
-    eprintln!("  ▶ Running: {}", full_cmd);
-    eprintln!();
-
-    let mut child = tokio::process::Command::new(&shell)
-        .arg("-c")
-        .arg(&full_cmd)
-        .envs(env_vars.iter().map(|(k, v)| (*k, v.as_str())))
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .stdin(Stdio::inherit())
-        .spawn()?;
-
-    // Wait for either child exit or Ctrl+C
-    let exit_code = tokio::select! {
-        status = child.wait() => {
-            status.map(|s| s.code().unwrap_or(1)).unwrap_or(1)
-        }
-        _ = signal::ctrl_c() => {
-            eprintln!("\n  ⏹ Interrupted — stopping...");
-            child.kill().await.ok();
-            130
-        }
-    };
-
-    // Stop the proxy
-    eprintln!();
-    eprintln!("  ⏹ Stopping mirage-proxy...");
-    proxy_proc.kill().await.ok();
-    proxy_proc.wait().await.ok();
-    eprintln!("  ✓ Clean exit");
-
-    std::process::exit(exit_code);
+    Ok(())
 }
