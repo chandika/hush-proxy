@@ -28,7 +28,7 @@ Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends 
 
 ```bash
 # Homebrew (macOS & Linux)
-brew tap chandika/tap && brew install mirage-proxy
+brew install chandika/tap/mirage-proxy
 
 # Scoop (Windows)
 scoop bucket add chandika https://github.com/chandika/scoop-bucket
