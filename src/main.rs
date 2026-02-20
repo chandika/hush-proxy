@@ -179,9 +179,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .or_else(|| std::env::var("MIRAGE_VAULT_KEY").ok());
     let vault = vault_key.as_ref().map(|passphrase| {
         let key = Vault::key_from_passphrase(passphrase);
-        let v = Vault::new(
+        let legacy_key = Vault::key_from_passphrase_legacy(passphrase);
+        let v = Vault::new_with_legacy(
             std::path::PathBuf::from(&args.vault_path),
             &key,
+            Some(&legacy_key),
             args.vault_flush_threshold,
         );
         Arc::new(v)

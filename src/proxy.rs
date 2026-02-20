@@ -412,15 +412,48 @@ async fn handle_streaming_response(
     let stats_clone = state.stats.clone();
     tokio::spawn(async move {
         let mut stream = response.bytes_stream();
+        // Buffer to handle fake values split across chunk boundaries.
+        // We hold back up to BOUNDARY_BUF_SIZE bytes from the end of each chunk
+        // and prepend them to the next chunk before rehydrating.
+        const BOUNDARY_BUF_SIZE: usize = 128;
+        let mut leftover = String::new();
+
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     stats_clone.add_response(bytes.len() as u64);
                     let text = String::from_utf8_lossy(&bytes);
-                    let rehydrated = if state.config.dry_run {
+
+                    // Prepend any leftover from the previous chunk
+                    let combined = if leftover.is_empty() {
                         text.to_string()
                     } else {
-                        faker.rehydrate(&text)
+                        let mut s = std::mem::take(&mut leftover);
+                        s.push_str(&text);
+                        s
+                    };
+
+                    // Hold back the tail of this chunk as potential boundary overlap
+                    let (to_process, new_leftover) = if combined.len() > BOUNDARY_BUF_SIZE {
+                        let split_at = combined.len() - BOUNDARY_BUF_SIZE;
+                        // Don't split in the middle of a UTF-8 char or an SSE event line
+                        // Find the last newline within the buffer zone for a clean split
+                        let safe_split = combined[split_at..].find('\n')
+                            .map(|pos| split_at + pos + 1)
+                            .unwrap_or(split_at);
+                        (&combined[..safe_split], &combined[safe_split..])
+                    } else {
+                        // Chunk is smaller than buffer — hold it all, emit nothing yet
+                        leftover = combined;
+                        continue;
+                    };
+
+                    leftover = new_leftover.to_string();
+
+                    let rehydrated = if state.config.dry_run {
+                        to_process.to_string()
+                    } else {
+                        faker.rehydrate(to_process)
                     };
                     let frame = Frame::data(Bytes::from(rehydrated));
                     if tx.send(Ok(frame)).await.is_err() {
@@ -432,6 +465,17 @@ async fn handle_streaming_response(
                     break;
                 }
             }
+        }
+
+        // Flush any remaining leftover
+        if !leftover.is_empty() {
+            let rehydrated = if state.config.dry_run {
+                leftover
+            } else {
+                faker.rehydrate(&leftover)
+            };
+            let frame = Frame::data(Bytes::from(rehydrated));
+            let _ = tx.send(Ok(frame)).await;
         }
     });
 

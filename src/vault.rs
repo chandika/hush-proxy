@@ -55,19 +55,41 @@ struct VaultEntry {
 
 impl Vault {
     /// Create or load a vault.
-    /// `key` must be exactly 32 bytes (256-bit). Derive from user passphrase with argon2/scrypt.
+    /// `key` must be exactly 32 bytes (256-bit). Derived from passphrase via Argon2id.
+    /// If loading fails with the primary key, attempts legacy SHA-256 derivation
+    /// for backward compatibility, then re-encrypts with the new key.
     pub fn new(path: PathBuf, key: &[u8; KEY_LEN], flush_threshold: usize) -> Self {
+        Self::new_with_legacy(path, key, None, flush_threshold)
+    }
+
+    /// Create or load a vault with optional legacy key fallback.
+    pub fn new_with_legacy(path: PathBuf, key: &[u8; KEY_LEN], legacy_key: Option<&[u8; KEY_LEN]>, flush_threshold: usize) -> Self {
         let cipher = Aes256Gcm::new_from_slice(key).expect("valid 256-bit key");
 
         let inner = if path.exists() {
             match Self::load_from_disk(&path, &cipher) {
                 Ok(inner) => {
-                    info!("Loaded vault with {} mappings from {}", inner.forward.len(), path.display());
+                    info!("Loaded vault with {} session(s) from {}", inner.sessions.len(), path.display());
                     inner
                 }
                 Err(e) => {
-                    warn!("Failed to load vault (wrong key?): {}. Starting fresh.", e);
-                    VaultInner::default()
+                    // Try legacy key if provided
+                    if let Some(lk) = legacy_key {
+                        let legacy_cipher = Aes256Gcm::new_from_slice(lk).expect("valid legacy key");
+                        match Self::load_from_disk(&path, &legacy_cipher) {
+                            Ok(inner) => {
+                                info!("Loaded vault using legacy key — will re-encrypt with argon2id on next flush");
+                                inner
+                            }
+                            Err(_) => {
+                                warn!("Failed to load vault (wrong key?): {}. Starting fresh.", e);
+                                VaultInner::default()
+                            }
+                        }
+                    } else {
+                        warn!("Failed to load vault (wrong key?): {}. Starting fresh.", e);
+                        VaultInner::default()
+                    }
                 }
             }
         } else {
@@ -84,9 +106,29 @@ impl Vault {
         }
     }
 
-    /// Derive a 256-bit key from a passphrase using SHA-256.
-    /// For production, use argon2 or scrypt instead.
+    /// Derive a 256-bit key from a passphrase using Argon2id.
+    /// Falls back to SHA-256 only when loading legacy vaults.
     pub fn key_from_passphrase(passphrase: &str) -> [u8; KEY_LEN] {
+        // Fixed salt derived from the application name.
+        // Per-vault random salts would be better but would require a format change
+        // (salt stored in the vault file header). Good enough for passphrase-derived keys
+        // where the main threat is offline brute-force.
+        const SALT: &[u8] = b"mirage-proxy-vault-v1";
+        let params = argon2::Params::new(
+            19 * 1024, // 19 MiB memory (m_cost)
+            2,         // 2 iterations (t_cost)
+            1,         // 1 lane (p_cost)
+            Some(KEY_LEN),
+        ).expect("valid argon2 params");
+        let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+        let mut key = [0u8; KEY_LEN];
+        argon2.hash_password_into(passphrase.as_bytes(), SALT, &mut key)
+            .expect("argon2 hash");
+        key
+    }
+
+    /// Legacy SHA-256 key derivation for backward compatibility with existing vaults.
+    pub fn key_from_passphrase_legacy(passphrase: &str) -> [u8; KEY_LEN] {
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
         hasher.update(passphrase.as_bytes());
