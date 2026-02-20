@@ -108,6 +108,10 @@ impl Faker {
                 let mut maps = self.maps.lock().unwrap();
                 maps.forward.insert(original.to_string(), fake.clone());
                 maps.reverse.insert(fake.clone(), original.to_string());
+                // Add component-level reverse mappings for better rehydration robustness.
+                if matches!(kind, PiiKind::ConnectionString) {
+                    add_connection_component_mappings(&mut maps, original, &fake);
+                }
                 return fake;
             }
         }
@@ -129,6 +133,10 @@ impl Faker {
                 PiiKind::HighEntropy => fake_high_entropy(n, orig),
             }
         });
+
+        if matches!(kind, PiiKind::ConnectionString) {
+            add_connection_component_mappings(&mut maps, original, &fake);
+        }
 
         // Persist to vault with session scope
         if let Some(ref vault) = self.vault {
@@ -310,6 +318,73 @@ fn fake_connection_string(n: usize, original: &str) -> String {
     format!("{}{}:{}@{}:{}/{}", protocol, user, pass, host, port, db)
 }
 
+#[derive(Debug)]
+struct ConnParts {
+    user: Option<String>,
+    pass: Option<String>,
+    host: Option<String>,
+    db: Option<String>,
+}
+
+fn parse_connection_parts(s: &str) -> Option<ConnParts> {
+    let (_scheme, rest) = s.split_once("://")?;
+
+    let (auth_host, path_part) = match rest.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (rest, None),
+    };
+
+    let (auth_part, host_part) = match auth_host.rsplit_once('@') {
+        Some((a, h)) => (Some(a), h),
+        None => (None, auth_host),
+    };
+
+    let (user, pass) = match auth_part {
+        Some(a) => match a.split_once(':') {
+            Some((u, p)) => (Some(u.to_string()), Some(p.to_string())),
+            None => (Some(a.to_string()), None),
+        },
+        None => (None, None),
+    };
+
+    let host = if host_part.is_empty() {
+        None
+    } else {
+        // Strip optional :port
+        Some(host_part.split(':').next().unwrap_or(host_part).to_string())
+    };
+
+    let db = path_part.and_then(|p| {
+        let first = p.split('?').next().unwrap_or(p).split('/').next().unwrap_or("");
+        if first.is_empty() { None } else { Some(first.to_string()) }
+    });
+
+    Some(ConnParts { user, pass, host, db })
+}
+
+fn add_connection_component_mappings(maps: &mut FakerMaps, original: &str, fake: &str) {
+    let (Some(orig), Some(fk)) = (parse_connection_parts(original), parse_connection_parts(fake)) else {
+        return;
+    };
+
+    // Add reverse component mappings so rehydration still works when model rewrites the URI
+    // but preserves fake subcomponents (user/pass/host/db).
+    let pairs = [
+        (fk.user, orig.user),
+        (fk.pass, orig.pass),
+        (fk.host, orig.host),
+        (fk.db, orig.db),
+    ];
+
+    for (f, o) in pairs {
+        if let (Some(fake_comp), Some(orig_comp)) = (f, o) {
+            if !fake_comp.is_empty() && fake_comp != orig_comp {
+                maps.reverse.entry(fake_comp).or_insert(orig_comp);
+            }
+        }
+    }
+}
+
 fn fake_private_key(original: &str) -> String {
     // Preserve BEGIN/END markers, fake the content with matching length
     let header = if original.contains("RSA") {
@@ -434,5 +509,28 @@ mod tests {
         let conn = "mongodb+srv://admin:secret@cluster0.abc.mongodb.net/mydb";
         let fake = faker.fake(conn, &PiiKind::ConnectionString);
         assert!(fake.starts_with("mongodb+srv://"));
+    }
+
+    #[test]
+    fn test_connection_string_component_rehydrate() {
+        let faker = Faker::new(None, None);
+        let original = "postgresql://chandika:realSecretPass@db.prod.internal:5432/app_prod";
+        let fake = faker.fake(original, &PiiKind::ConnectionString);
+
+        // Simulate model rewriting around fake components
+        let fake_parts = parse_connection_parts(&fake).unwrap();
+        let rewritten = format!(
+            "psql \"postgresql://{}:{}@{}:5432/{}\"",
+            fake_parts.user.unwrap_or_default(),
+            fake_parts.pass.unwrap_or_default(),
+            fake_parts.host.unwrap_or_default(),
+            fake_parts.db.unwrap_or_default(),
+        );
+
+        let rehydrated = faker.rehydrate(&rewritten);
+        assert!(rehydrated.contains("chandika"));
+        assert!(rehydrated.contains("realSecretPass"));
+        assert!(rehydrated.contains("db.prod.internal"));
+        assert!(rehydrated.contains("app_prod"));
     }
 }
