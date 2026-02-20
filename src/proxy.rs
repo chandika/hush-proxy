@@ -56,6 +56,21 @@ pub async fn handle_request(
     let headers = req.headers().clone();
 
     debug!("{} {}", method, path);
+    for (name, value) in req.headers().iter() {
+        let n = name.as_str();
+        let v = value.to_str().unwrap_or("<binary>");
+        // Mask auth values in debug but show the header name and first/last chars
+        if n == "authorization" || n == "x-api-key" || n == "openai-organization" {
+            let masked = if v.len() > 12 {
+                format!("{}...{}", &v[..8], &v[v.len()-4..])
+            } else {
+                "***".to_string()
+            };
+            debug!("  → {}: {}", n, masked);
+        } else {
+            debug!("  → {}: {}", n, v);
+        }
+    }
 
     // Collect request body
     let body_bytes = match req.collect().await {
