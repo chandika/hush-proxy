@@ -463,9 +463,7 @@ Every **new** detection is logged to `mirage-audit.jsonl`:
 
 ## Streaming
 
-SSE streaming support for providers that return `text/event-stream` (Claude, OpenAI, etc.). Fakes are rehydrated in real-time as chunks arrive.
-
-**Known issue:** rehydration is chunk-by-chunk. If a fake value is split across two SSE chunks, it won't be caught. This can cause repeated or garbled lines in the client UI (observed in Claude Code during extended thinking). A cross-boundary buffer is planned.
+SSE streaming support for providers that return `text/event-stream` (Claude, OpenAI, etc.). Fakes are rehydrated in real-time as chunks arrive. A 128-byte overlap buffer across chunk boundaries catches fake values that span two SSE events.
 
 ## CLI reference
 
@@ -556,8 +554,8 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 
 ## Known limitations
 
-- **Streaming chunk boundaries** — rehydration is per-chunk. A fake value split across two SSE events won't be caught, causing occasional display glitches in clients like Claude Code. Fix: small cross-boundary buffer (planned).
-- **Vault key derivation** — currently raw SHA-256. Should be argon2 or scrypt. Works, but not best practice for passphrase-derived keys. On the roadmap.
+- **Streaming chunk boundaries** — ~~rehydration is per-chunk~~ Fixed in v0.5.18: 128-byte overlap buffer across SSE boundaries. Edge cases with very long fake values split exactly at the boundary remain theoretically possible.
+- **Vault key derivation** — ~~raw SHA-256~~ Fixed in v0.5.18: now Argon2id (19 MiB, 2 iterations). Legacy SHA-256 vaults auto-detected and re-encrypted on next flush.
 - **Detection is regex + entropy only** — no NLP/NER. Won't catch secrets described in natural language ("my key starts with AKIA...") or unusual formats.
 - **Rehydration false positives** — if the LLM independently generates text matching a fake value, it gets swapped. Rare in practice but theoretically possible.
 - **No Windows binary** in current release (Linux + macOS only).
@@ -582,8 +580,8 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 - [x] Pre-built binaries for macOS, Linux, Windows
 - [x] **Native OpenClaw integration (ClawdHub skill)**
 - [x] Binary SHA256 verification in installer
-- [ ] Cross-boundary buffer for streaming rehydration
-- [ ] Argon2/scrypt vault key derivation
+- [x] Cross-boundary buffer for streaming rehydration
+- [x] Argon2id vault key derivation (with legacy SHA-256 fallback)
 - [ ] Custom pattern definitions in config
 - [ ] Allowlist/blocklist glob matching
 - [ ] Optional ONNX NER for name/organization detection
