@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   update-tap:
-    if: secrets.HOMEBREW_TAP_TOKEN != '' && startsWith(github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name, 'v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
@@ -23,6 +23,16 @@ jobs:
       TAP_REPOSITORY: chandika/homebrew-tap
       FORMULA_PATH: Formula/mirage-proxy.rb
     steps:
+      - name: Validate required secret
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "Missing required secret: HOMEBREW_TAP_TOKEN"
+            exit 1
+          fi
+
       - name: Calculate source tarball SHA256
         id: checksum
         run: |
