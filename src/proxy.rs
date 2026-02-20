@@ -93,12 +93,10 @@ async fn forward_request(
     let is_chatgpt = headers.contains_key("chatgpt-account-id");
     let (target_url, _) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(path, is_chatgpt) {
         (format!("{}{}", upstream.trim_end_matches('/'), remaining), remaining)
-    } else if !state.target_url.is_empty() {
-        (format!("{}{}", state.target_url.trim_end_matches('/'), path), path.to_string())
     } else {
         return Ok(error_response(
             StatusCode::BAD_GATEWAY,
-            &format!("No provider configured for path: {}", path),
+            &format!("No provider matched for path: {}. Use a provider prefix (e.g. /anthropic, /openai).", path),
         ));
     };
 
@@ -186,7 +184,7 @@ pub async fn handle_request(
     let is_chatgpt_early = headers.contains_key("chatgpt-account-id");
     let resolved_upstream = crate::providers::resolve_provider(&path, is_chatgpt_early)
         .map(|(upstream, _)| upstream.to_string())
-        .unwrap_or_else(|| state.target_url.clone());
+        .unwrap_or_default();
     if state.config.is_bypassed(&resolved_upstream) {
         debug!("⏩ bypassing {} (matched bypass list)", resolved_upstream);
         let (_, faker) = state.sessions.get_faker("default");
@@ -277,17 +275,15 @@ pub async fn handle_request(
         redacted_body
     };
 
-    // Resolve target: check provider routing first, then fall back to --target
+    // Resolve provider
     let is_chatgpt = headers.contains_key("chatgpt-account-id");
     let (target_url, forward_path) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(&path, is_chatgpt) {
         (format!("{}{}", upstream.trim_end_matches('/'), remaining), remaining)
-    } else if !state.target_url.is_empty() {
-        (format!("{}{}", state.target_url.trim_end_matches('/'), &path), path.clone())
     } else {
         warn!("No provider matched for path: {}", path);
         return Ok(error_response(
             StatusCode::BAD_GATEWAY,
-            &format!("No provider configured for path: {}. Use a provider prefix (e.g. /anthropic, /openai) or set --target.", path),
+            &format!("No provider matched for path: {}. Use a provider prefix (e.g. /anthropic, /openai).", path),
         ));
     };
     let _ = forward_path; // used for clarity, target_url has the full URL
