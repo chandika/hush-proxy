@@ -34,9 +34,6 @@ brew install chandika/tap/mirage-proxy
 scoop bucket add chandika https://github.com/chandika/scoop-bucket
 scoop install mirage-proxy
 
-# npm (any platform)
-npm install -g mirage-proxy
-
 # Pre-built binaries (macOS, Linux, Windows)
 # → https://github.com/chandika/mirage-proxy/releases
 
