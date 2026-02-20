@@ -2,21 +2,56 @@
 
 **Invisible sensitive data filter for LLM APIs.** Single Rust binary, sub-millisecond overhead.
 
+**Now a native [OpenClaw](https://openclaw.ai) provider — install the skill in one command. [↓ Jump to OpenClaw](#openclaw-integration)**
+
 Your coding agent reads your `.env`, your codebase, your credentials — and sends all of it to the cloud. Mirage sits between your client and the provider, silently replacing sensitive data with plausible fakes. The LLM never knows. Your secrets never leave.
 
 ```
-You:     "Deploy key is AKIAIOSFODNN7EXAMPLE, email ops@acme.com"
+You:     "Deploy key is AKIAHOV29GNU18FMT07E, email chris.harris@gmail.com"
          ↓
-Mirage:  "Deploy key is AKIAHQ7RN2XK5M3B9Y1T, email jordan.walker3@proton.me"
+Mirage:  "Deploy key is AKIA7ELSZ6DKRY5CJQX4, email robin.thomas1234@aol.com"
          ↓
 Provider: (sees only fake data, responds normally)
          ↓
 Mirage:  (swaps fakes back to originals in the response)
          ↓
-You:     "Done! I've drafted the deploy script for ops@acme.com"
+You:     "Done! I've drafted the deploy script for chris.harris@gmail.com"
 ```
 
 No `[REDACTED]`. No `[[PERSON_1]]`. The provider sees a completely normal request with completely fake data. Responses are rehydrated transparently.
+
+## OpenClaw integration
+
+Mirage is a **first-class OpenClaw provider**. If you're running [OpenClaw](https://openclaw.ai), install the skill from [ClawdHub](https://clawdhub.com) and every message your agent sends to Anthropic, OpenAI, or any other provider passes through Mirage first — automatically, with no extra configuration.
+
+```bash
+# Install the mirage-proxy skill from ClawdHub
+clawdhub install mirage-proxy
+```
+
+The skill handles everything:
+
+- **Auto-start** — Mirage launches on container boot as a sidecar process
+- **Provider registration** — Registers `mirage-anthropic` as a custom provider routing through `localhost:8686`, with ready-to-use model aliases (`mirage-sonnet`, `mirage-haiku`, `mirage-opus`)
+- **Health monitoring** — Heartbeat checks restart Mirage if it dies on session compaction or restart
+- **Zero config** — Your existing OpenClaw sessions route through Mirage without touching a settings file
+
+Your agent's full context — codebase, memory files, tool outputs — gets filtered on every turn before it hits the provider. Secrets that were already in your `.env` or workspace files never leave clean.
+
+To use a miraged model in OpenClaw:
+
+```bash
+# In any session: switch to a filtered provider
+/model mirage-sonnet
+# or set it as default in your gateway config:
+# default_model: mirage-anthropic/claude-sonnet-4-6
+```
+
+The `mirage-anthropic/*` aliases behave identically to the direct Anthropic models — same capabilities, same latency profile, invisible filtering layer in between.
+
+> **Why this matters for OpenClaw users:** OpenClaw agents read your entire workspace — MEMORY.md, config files, daily notes, project repos. That's a lot of sensitive surface area hitting cloud APIs on every heartbeat. Mirage closes that gap without changing how your agent works.
+
+---
 
 ## Why this matters
 
@@ -140,7 +175,7 @@ Mirage shows a clean live display — no log spam, just what matters:
 
 | Type | Example | Detection |
 |---|---|---|
-| AWS Access Keys | `AKIAIOSFODNN7EXAMPLE` | Prefix `AKIA`, `ASIA`, `ABIA`, `ACCA` |
+| AWS Access Keys | `AKIAHOV29GNU18FMT07E` | Prefix `AKIA`, `ASIA`, `ABIA`, `ACCA` |
 | GitHub Tokens | `ghp_xxxxxxxxxxxx` | Prefix `ghp_`, `ghs_`, `gho_`, `ghu_`, `ghr_` |
 | OpenAI API Keys | `sk-proj-abc123...` | Prefix `sk-proj-`, `sk-ant-` |
 | Google API Keys | `AIzaSyA...` | Prefix `AIza` |
@@ -156,11 +191,11 @@ Mirage shows a clean live display — no log spam, just what matters:
 
 | Type | Original | Fake |
 |---|---|---|
-| Email | `sam@acme.com` | `jordan.walker3@proton.me` |
-| Phone (intl) | `+1-555-123-4567` | `+1-237-153-1071` |
-| Phone (US) | `(555) 123-4567` | `(237) 153-1071` |
-| SSN | `123-45-6789` | `537-28-4071` |
-| Credit Card | `4111 1111 1111 1111` | `4532 7891 2345 6178` |
+| Email | `taylor.hall@gmail.com` | `robin.thomas1234@aol.com` |
+| Phone (intl) | `+1-570-630-1710` | `+1-533-577-1639` |
+| Phone (US) | `(496) 524-1568` | `(459) 471-1497` |
+| SSN | `322-58-1426` | `285-95-1355` |
+| Credit Card | `4345 6789 0123 4567` | `4012 3456 7890 1234` |
 | IP Address | `10.0.1.42` | `172.18.3.97` |
 
 ### How fakes work
@@ -171,7 +206,7 @@ Every fake **matches the format and length** of the original:
 - A phone number keeps its country code and formatting
 - A credit card keeps its issuer prefix and passes Luhn validation
 
-**Session consistency:** Within a conversation, `sam@acme.com` always maps to the same fake. The LLM's context stays coherent. Different conversations get different fakes.
+**Session consistency:** Within a conversation, `taylor.hall@gmail.com` always maps to the same fake. The LLM's context stays coherent. Different conversations get different fakes.
 
 ## Configuration
 
@@ -334,6 +369,7 @@ Set `MIRAGE_NO_UPDATE_CHECK=1` to disable update checks globally.
 | Streaming | Yes | Yes | No | Partial |
 | Dedup | Yes | No | No | No |
 | Auto-setup | Yes | No | No | No |
+| OpenClaw native | **Yes** | No | No | No |
 
 The key difference: other tools use **visible tokens** that tell the LLM data was removed. The LLM adapts its behavior — it might refuse to write code involving `[[PERSON_1]]`, or generate awkward workarounds. Mirage's fakes are **invisible** — the LLM processes the request normally because it looks normal.
 
@@ -392,17 +428,18 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 - [x] Auto-setup for Claude Code, Cursor, Codex, Aider
 - [x] Live TUI with in-place stats
 - [x] International phone number support
-- [ ] Extended secret patterns (Gitleaks + secrets-patterns-db)
-- [ ] Custom pattern definitions in config
-- [ ] Allowlist/blocklist glob matching
-- [ ] Optional ONNX NER for name/organization detection
-- [ ] Route mode (sensitive requests → local model)
+- [x] Extended secret patterns (Gitleaks + secrets-patterns-db)
 - [x] Multi-provider routing (28+ providers, auto-detect)
 - [x] ChatGPT account auth support (Codex CLI with Plus/Pro/Team)
 - [x] zstd/gzip compressed body handling
 - [x] Homebrew distribution (auto-updated formula on release)
-- [ ] npm / scoop distribution
 - [x] Pre-built binaries for macOS, Linux, Windows
+- [x] **Native OpenClaw integration (ClawdHub skill)**
+- [ ] Custom pattern definitions in config
+- [ ] Allowlist/blocklist glob matching
+- [ ] Optional ONNX NER for name/organization detection
+- [ ] Route mode (sensitive requests → local model)
+- [ ] npm / scoop distribution
 
 ## License
 
