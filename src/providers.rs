@@ -64,17 +64,20 @@ pub fn resolve_provider(path: &str) -> Option<(&'static str, String)> {
         }
     }
 
-    // Auto-detect OpenAI paths — pass through as-is (no /v1 prefix).
-    // Codex uses session auth at /responses (not /v1/responses).
-    // Clients using the developer API already send /v1/... in their paths.
-    if path.starts_with("/v1/")
-        || path.starts_with("/responses")
+    // Auto-detect OpenAI paths.
+    // /v1/* passes through as-is (client already includes prefix).
+    // Bare paths like /responses, /chat/completions, /models get /v1 prepended
+    // (Codex CLI sends bare /responses — OpenAI needs /v1/responses).
+    if path.starts_with("/v1/") {
+        return Some(("https://api.openai.com", path.to_string()));
+    }
+    if path.starts_with("/responses")
         || path.starts_with("/chat/completions")
         || path.starts_with("/completions")
         || path.starts_with("/embeddings")
         || path.starts_with("/models")
     {
-        return Some(("https://api.openai.com", path.to_string()));
+        return Some(("https://api.openai.com", format!("/v1{}", path)));
     }
 
     None
