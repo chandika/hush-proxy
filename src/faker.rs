@@ -1,13 +1,16 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::redactor::PiiKind;
+use crate::vault::Vault;
 
 /// Generates plausible fake values that match the original's length and format.
 /// The LLM never knows redaction happened — invisible substitution.
 /// Consistent within a session — same input always gets same fake.
+/// If a vault is provided, mappings persist encrypted at rest.
 pub struct Faker {
     maps: Mutex<FakerMaps>,
+    vault: Option<Arc<Vault>>,
 }
 
 struct FakerMaps {
@@ -67,16 +70,28 @@ static FAKE_SURNAMES: &[&str] = &[
 ];
 
 impl Faker {
-    pub fn new() -> Self {
+    pub fn new(vault: Option<Arc<Vault>>) -> Self {
         Faker {
             maps: Mutex::new(FakerMaps::new()),
+            vault,
         }
     }
 
     /// Generate a plausible fake for any PII kind, matching format and length
     pub fn fake(&self, original: &str, kind: &PiiKind) -> String {
+        // Check vault first for persisted mapping
+        if let Some(ref vault) = self.vault {
+            if let Some(fake) = vault.get_fake(original) {
+                // Also cache in memory
+                let mut maps = self.maps.lock().unwrap();
+                maps.forward.insert(original.to_string(), fake.clone());
+                maps.reverse.insert(fake.clone(), original.to_string());
+                return fake;
+            }
+        }
+
         let mut maps = self.maps.lock().unwrap();
-        maps.get_or_insert(original, |n, orig| {
+        let fake = maps.get_or_insert(original, |n, orig| {
             match kind {
                 PiiKind::Email => fake_email(n, orig),
                 PiiKind::Phone => fake_phone(n, orig),
@@ -91,7 +106,14 @@ impl Faker {
                 PiiKind::PrivateKey => fake_private_key(orig),
                 PiiKind::HighEntropy => fake_high_entropy(n, orig),
             }
-        })
+        });
+
+        // Persist to vault
+        if let Some(ref vault) = self.vault {
+            vault.put(original, &fake, kind.label());
+        }
+
+        fake
     }
 
     /// Rehydrate: restore fakes back to originals
@@ -315,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_consistent_fake() {
-        let faker = Faker::new();
+        let faker = Faker::new(None);
         let email = "real@company.com";
         let fake1 = faker.fake(email, &PiiKind::Email);
         let fake2 = faker.fake(email, &PiiKind::Email);
@@ -326,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_phone_format_preserved() {
-        let faker = Faker::new();
+        let faker = Faker::new(None);
         let phone = "(555) 123-4567";
         let fake = faker.fake(phone, &PiiKind::Phone);
         assert!(fake.contains('('));
@@ -336,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_aws_key_format() {
-        let faker = Faker::new();
+        let faker = Faker::new(None);
         let key = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
         let fake = faker.fake(&key, &PiiKind::AwsKey);
         assert!(fake.starts_with("AKIA"));
@@ -345,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_high_entropy_length_match() {
-        let faker = Faker::new();
+        let faker = Faker::new(None);
         let secret = "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6kL9";
         let fake = faker.fake(secret, &PiiKind::HighEntropy);
         assert_eq!(fake.len(), secret.len());
@@ -354,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_rehydrate() {
-        let faker = Faker::new();
+        let faker = Faker::new(None);
         let email = "real@company.com";
         let fake = faker.fake(email, &PiiKind::Email);
         let text = format!("Contact {}", fake);
@@ -364,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_ssn_format() {
-        let faker = Faker::new();
+        let faker = Faker::new(None);
         let ssn = "123-45-6789";
         let fake = faker.fake(ssn, &PiiKind::Ssn);
         assert_ne!(fake, ssn);
@@ -375,7 +397,7 @@ mod tests {
 
     #[test]
     fn test_ip_format() {
-        let faker = Faker::new();
+        let faker = Faker::new(None);
         let ip = "192.168.1.100";
         let fake = faker.fake(ip, &PiiKind::IpAddress);
         assert_ne!(fake, ip);
@@ -385,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_connection_string_protocol_preserved() {
-        let faker = Faker::new();
+        let faker = Faker::new(None);
         let conn = "mongodb+srv://admin:secret@cluster0.abc.mongodb.net/mydb";
         let fake = faker.fake(conn, &PiiKind::ConnectionString);
         assert!(fake.starts_with("mongodb+srv://"));

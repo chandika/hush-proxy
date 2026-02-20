@@ -13,6 +13,7 @@ use crate::audit::AuditLog;
 use crate::config::{Config, RedactAction};
 use crate::faker::Faker;
 use crate::redactor::detect;
+use crate::vault::Vault;
 
 pub struct ProxyState {
     pub target_url: String,
@@ -20,6 +21,7 @@ pub struct ProxyState {
     pub faker: Faker,
     pub config: Config,
     pub audit_log: Option<Arc<AuditLog>>,
+    pub vault: Option<Arc<Vault>>,
 }
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;

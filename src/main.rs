@@ -3,6 +3,7 @@ mod config;
 mod faker;
 mod proxy;
 mod redactor;
+mod vault;
 
 use clap::Parser;
 use hyper::server::conn::http1;
@@ -18,6 +19,7 @@ use audit::AuditLog;
 use config::Config;
 use faker::Faker;
 use proxy::{handle_request, ProxyState};
+use vault::Vault;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -56,6 +58,18 @@ struct Args {
     /// Sensitivity level (low, medium, high, paranoid)
     #[arg(long)]
     sensitivity: Option<String>,
+
+    /// Vault encryption key (passphrase). Can also use HUSH_VAULT_KEY env var.
+    #[arg(long)]
+    vault_key: Option<String>,
+
+    /// Vault file path
+    #[arg(long, default_value = "./hush-vault.enc")]
+    vault_path: String,
+
+    /// Flush vault after N new mappings (0 = manual only)
+    #[arg(long, default_value = "50")]
+    vault_flush_threshold: usize,
 }
 
 #[tokio::main]
@@ -99,12 +113,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None
     };
 
+    let vault_key = args.vault_key.or_else(|| std::env::var("HUSH_VAULT_KEY").ok());
+    let vault = vault_key.as_ref().map(|passphrase| {
+        let key = Vault::key_from_passphrase(passphrase);
+        let v = Vault::new(
+            std::path::PathBuf::from(&args.vault_path),
+            &key,
+            args.vault_flush_threshold,
+        );
+        Arc::new(v)
+    });
+
     let state = Arc::new(ProxyState {
         target_url: cfg.target.clone(),
         client: Client::new(),
-        faker: Faker::new(),
+        faker: Faker::new(vault.clone()),
         config: cfg.clone(),
         audit_log,
+        vault: vault.clone(),
     });
 
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse()?;
@@ -117,6 +143,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("  Dry run:      {}", cfg.dry_run);
     if cfg.audit.enabled {
         info!("  Audit log:    {}", cfg.audit.path.display());
+    }
+    if vault.is_some() {
+        info!("  Vault:        {} (encrypted)", args.vault_path);
     }
 
     loop {
