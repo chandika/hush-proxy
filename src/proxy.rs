@@ -74,7 +74,9 @@ pub async fn handle_request(
                 if is_new {
                     state.stats.add_session();
                 }
-                debug!("Session: {} — redacting request", session_id);
+                if is_new {
+                    info!("📎 New session: {}", &session_id[..8]);
+                }
                 redact_json_value(&mut json, &state, &faker);
                 (serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()), faker)
             }

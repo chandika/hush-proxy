@@ -54,7 +54,9 @@ impl SessionManager {
             has_signal = true;
         }
 
-        // Use system prompt — Anthropic puts it top-level (string or array), OpenAI puts it in messages
+        // Use system prompt for session identity.
+        // Only hash the FIRST system block — subsequent blocks often contain volatile
+        // tool definitions and cache markers that change every request.
         if let Some(system) = body.get("system") {
             if let Some(s) = system.as_str() {
                 // Anthropic Messages API: "system" as a top-level string
@@ -62,8 +64,9 @@ impl SessionManager {
                 has_signal = true;
             } else if let Some(arr) = system.as_array() {
                 // Anthropic Messages API: "system" as array of content blocks
-                for block in arr {
-                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                // Use only the first text block (core identity), skip tool defs
+                if let Some(first) = arr.first() {
+                    if let Some(text) = first.get("text").and_then(|t| t.as_str()) {
                         hasher.update(text.as_bytes());
                         has_signal = true;
                     }
