@@ -29,6 +29,8 @@ Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends 
 ```bash
 # Homebrew (macOS & Linux)
 brew install chandika/tap/mirage-proxy
+# If a new tag was just released:
+brew update && brew upgrade mirage-proxy
 
 # Scoop (Windows)
 scoop bucket add chandika https://github.com/chandika/scoop-bucket
@@ -40,6 +42,8 @@ scoop install mirage-proxy
 # Build from source
 cargo install --git https://github.com/chandika/mirage-proxy
 ```
+
+Release details: [`docs/releasing.md`](docs/releasing.md)
 
 ## Quick start
 
@@ -387,8 +391,9 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 - [x] Multi-provider routing (28+ providers, auto-detect)
 - [x] ChatGPT account auth support (Codex CLI with Plus/Pro/Team)
 - [x] zstd/gzip compressed body handling
-- [ ] Homebrew / npm / scoop distribution
-- [ ] Pre-built binaries for macOS, Linux, Windows (CI in progress)
+- [x] Homebrew distribution (auto-updated formula on release)
+- [ ] npm / scoop distribution
+- [x] Pre-built binaries for macOS, Linux, Windows
 
 ## License
 

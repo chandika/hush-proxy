@@ -1,0 +1,81 @@
+name: Update Homebrew Tap
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish to Homebrew tap (example: v0.5.15)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    if: secrets.HOMEBREW_TAP_TOKEN != '' && startsWith(github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+      REPOSITORY: ${{ github.repository }}
+      TAP_REPOSITORY: chandika/homebrew-tap
+      FORMULA_PATH: Formula/mirage-proxy.rb
+    steps:
+      - name: Calculate source tarball SHA256
+        id: checksum
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          curl -fsSL "$URL" -o source.tar.gz
+          SHA256="$(sha256sum source.tar.gz | awk '{print $1}')"
+          VERSION="${TAG#v}"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update formula
+        env:
+          URL: ${{ steps.checksum.outputs.url }}
+          SHA256: ${{ steps.checksum.outputs.sha256 }}
+          VERSION: ${{ steps.checksum.outputs.version }}
+        run: |
+          set -euo pipefail
+          ruby -e '
+            path = File.join("tap", ENV.fetch("FORMULA_PATH"))
+            content = File.read(path)
+            updated = content.dup
+
+            updated.sub!(/^\s*url\s+"[^"]+"/, %{  url "#{ENV.fetch("URL")}"}) || abort("Could not find url line")
+            updated.sub!(/^\s*sha256\s+"[0-9a-f]{64}"/, %{  sha256 "#{ENV.fetch("SHA256")}"}) || abort("Could not find sha256 line")
+
+            if updated.match?(/^\s*version\s+"/)
+              updated.sub!(/^\s*version\s+"[^"]+"/, %{  version "#{ENV.fetch("VERSION")}"})
+            end
+
+            File.write(path, updated)
+          '
+
+      - name: Commit and push formula update
+        env:
+          VERSION: ${{ steps.checksum.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd tap
+          if git diff --quiet -- "${FORMULA_PATH}"; then
+            echo "No formula changes detected."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${FORMULA_PATH}"
+          git commit -m "mirage-proxy ${VERSION}"
+          git push
