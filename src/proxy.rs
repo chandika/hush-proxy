@@ -361,6 +361,21 @@ pub async fn handle_request(
     }
 }
 
+fn header_content_encoding(headers: &reqwest::header::HeaderMap) -> String {
+    headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn has_anthropic_thinking_signature(text: &str) -> bool {
+    // Anthropic extended thinking blocks are signed.
+    // Any mutation inside those blocks invalidates the signature.
+    (text.contains("\"type\":\"thinking\"") || text.contains("\"type\": \"thinking\""))
+        && (text.contains("\"signature\":\"") || text.contains("\"signature\": \""))
+}
+
 async fn handle_regular_response(
     status: reqwest::StatusCode,
     resp_headers: reqwest::header::HeaderMap,
@@ -379,12 +394,26 @@ async fn handle_regular_response(
         debug!("  ← error body: {}", preview);
     }
 
-    // Rehydrate: replace fakes back to originals in the response
-    // Use string replacement on raw bytes to avoid JSON re-serialization artifacts
+    // Rehydrate: replace fakes back to originals in the response.
+    // Safety guards:
+    // - Skip compressed responses (rehydrating compressed bytes corrupts stream)
+    // - Skip Anthropic signed thinking blocks (mutation invalidates signature)
+    let content_encoding = header_content_encoding(&resp_headers);
+    let is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
+
     let rehydrated_body = if !body_bytes.is_empty() && !state.config.dry_run {
         let text = String::from_utf8_lossy(&body_bytes);
-        let rehydrated = faker.rehydrate(&text);
-        rehydrated.into_bytes()
+
+        if is_compressed {
+            debug!("skipping rehydration for compressed response (content-encoding={})", content_encoding);
+            body_bytes.to_vec()
+        } else if has_anthropic_thinking_signature(&text) {
+            debug!("skipping rehydration for signed thinking response");
+            body_bytes.to_vec()
+        } else {
+            let rehydrated = faker.rehydrate(&text);
+            rehydrated.into_bytes()
+        }
     } else {
         body_bytes.to_vec()
     };
@@ -416,53 +445,68 @@ async fn handle_streaming_response(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, hyper::Error>>(32);
 
+    let content_encoding = header_content_encoding(&resp_headers);
+    let stream_is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
+
     let stats_clone = state.stats.clone();
     tokio::spawn(async move {
         let mut stream = response.bytes_stream();
         // Buffer to handle fake values split across chunk boundaries.
-        // We hold back up to BOUNDARY_BUF_SIZE bytes from the end of each chunk
-        // and prepend them to the next chunk before rehydrating.
         const BOUNDARY_BUF_SIZE: usize = 128;
         let mut leftover = String::new();
+        let mut skip_for_signed_thinking = false;
 
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     stats_clone.add_response(bytes.len() as u64);
-                    let text = String::from_utf8_lossy(&bytes);
 
-                    // Prepend any leftover from the previous chunk
-                    let combined = if leftover.is_empty() {
-                        text.to_string()
+                    let bypass_rehydrate = state.config.dry_run || stream_is_compressed || skip_for_signed_thinking;
+                    let out = if bypass_rehydrate {
+                        if leftover.is_empty() {
+                            bytes.to_vec()
+                        } else {
+                            let mut s = std::mem::take(&mut leftover);
+                            s.push_str(&String::from_utf8_lossy(&bytes));
+                            s.into_bytes()
+                        }
                     } else {
-                        let mut s = std::mem::take(&mut leftover);
-                        s.push_str(&text);
-                        s
+                        let text = String::from_utf8_lossy(&bytes);
+
+                        // Prepend any leftover from previous chunk
+                        let combined = if leftover.is_empty() {
+                            text.to_string()
+                        } else {
+                            let mut s = std::mem::take(&mut leftover);
+                            s.push_str(&text);
+                            s
+                        };
+
+                        // Do not touch signed thinking payloads (Anthropic validates signatures)
+                        if has_anthropic_thinking_signature(&combined) {
+                            skip_for_signed_thinking = true;
+                            debug!("detected signed thinking chunk in SSE stream — disabling rehydration for remainder");
+                            combined.into_bytes()
+                        } else {
+                            // Hold back tail as overlap to catch boundary-split fake values
+                            let (to_process, new_leftover) = if combined.len() > BOUNDARY_BUF_SIZE {
+                                let split_at = combined.len() - BOUNDARY_BUF_SIZE;
+                                let safe_split = combined[split_at..]
+                                    .find('\n')
+                                    .map(|pos| split_at + pos + 1)
+                                    .unwrap_or(split_at);
+                                (&combined[..safe_split], &combined[safe_split..])
+                            } else {
+                                leftover = combined;
+                                continue;
+                            };
+
+                            leftover = new_leftover.to_string();
+                            faker.rehydrate(to_process).into_bytes()
+                        }
                     };
 
-                    // Hold back the tail of this chunk as potential boundary overlap
-                    let (to_process, new_leftover) = if combined.len() > BOUNDARY_BUF_SIZE {
-                        let split_at = combined.len() - BOUNDARY_BUF_SIZE;
-                        // Don't split in the middle of a UTF-8 char or an SSE event line
-                        // Find the last newline within the buffer zone for a clean split
-                        let safe_split = combined[split_at..].find('\n')
-                            .map(|pos| split_at + pos + 1)
-                            .unwrap_or(split_at);
-                        (&combined[..safe_split], &combined[safe_split..])
-                    } else {
-                        // Chunk is smaller than buffer — hold it all, emit nothing yet
-                        leftover = combined;
-                        continue;
-                    };
-
-                    leftover = new_leftover.to_string();
-
-                    let rehydrated = if state.config.dry_run {
-                        to_process.to_string()
-                    } else {
-                        faker.rehydrate(to_process)
-                    };
-                    let frame = Frame::data(Bytes::from(rehydrated));
+                    let frame = Frame::data(Bytes::from(out));
                     if tx.send(Ok(frame)).await.is_err() {
                         break;
                     }
@@ -474,14 +518,13 @@ async fn handle_streaming_response(
             }
         }
 
-        // Flush any remaining leftover
         if !leftover.is_empty() {
-            let rehydrated = if state.config.dry_run {
-                leftover
+            let flushed = if state.config.dry_run || stream_is_compressed || skip_for_signed_thinking {
+                leftover.into_bytes()
             } else {
-                faker.rehydrate(&leftover)
+                faker.rehydrate(&leftover).into_bytes()
             };
-            let frame = Frame::data(Bytes::from(rehydrated));
+            let frame = Frame::data(Bytes::from(flushed));
             let _ = tx.send(Ok(frame)).await;
         }
     });
