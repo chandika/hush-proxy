@@ -5,7 +5,8 @@ use hyper::body::Frame;
 use hyper::{Request, Response, StatusCode};
 use reqwest::Client;
 use serde_json::Value;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
@@ -24,6 +25,8 @@ pub struct ProxyState {
     pub config: Config,
     pub audit_log: Option<Arc<AuditLog>>,
     pub stats: Arc<Stats>,
+    /// Global set of PII values already seen (by hash) — dedup across all sessions
+    pub seen_pii: Mutex<HashSet<String>>,
 }
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -254,7 +257,12 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
     for entity in &entities {
         let label = entity.kind.label();
         let action = state.config.should_redact(label);
-        let is_new = !faker.is_known(&entity.original);
+
+        // Global dedup: check if we've ever seen this exact value
+        let is_new = {
+            let mut seen = state.seen_pii.lock().unwrap();
+            seen.insert(entity.original.clone())  // returns true if newly inserted
+        };
 
         // Only audit-log and count genuinely new detections
         if is_new {

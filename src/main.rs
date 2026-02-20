@@ -14,7 +14,8 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use reqwest::Client;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
@@ -152,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config: cfg.clone(),
         audit_log,
         stats: stats.clone(),
+        seen_pii: Mutex::new(HashSet::new()),
     });
 
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse()?;
