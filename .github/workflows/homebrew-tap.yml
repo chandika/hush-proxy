@@ -1,13 +1,13 @@
 name: Update Homebrew Tap
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish to Homebrew tap (example: v0.5.15)'
+        description: 'Tag to publish to Homebrew tap (example: v0.7.2)'
         required: true
 
 permissions:
@@ -15,10 +15,12 @@ permissions:
 
 jobs:
   update-tap:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'v')
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     env:
-      TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.workflow_run.head_branch }}
       REPOSITORY: ${{ github.repository }}
       TAP_REPOSITORY: chandika/homebrew-tap
       FORMULA_PATH: Formula/mirage-proxy.rb
@@ -33,40 +35,53 @@ jobs:
             exit 1
           fi
 
-      - name: Calculate release asset SHA256 values
+      - name: Resolve and validate tag
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG}" ]; then
+            echo "TAG is empty"
+            exit 1
+          fi
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "TAG '${TAG}' is not a semver tag"
+            exit 1
+          fi
+          echo "Using tag: ${TAG}"
+
+      - name: Download binaries and compute SHA256s
         id: checksums
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          for name in \
-            "mirage-proxy-${TAG}-macos-arm64" \
-            "mirage-proxy-${TAG}-macos-x86_64" \
-            "mirage-proxy-${TAG}-linux-arm64" \
-            "mirage-proxy-${TAG}-linux-x86_64"
-          do
-            url="https://github.com/${REPOSITORY}/releases/download/${TAG}/${name}"
-            curl -fsSL "$url" -o "$name"
-            sha="$(sha256sum "$name" | awk '{print $1}')"
-            case "$name" in
-              *macos-arm64)
-                echo "macos_arm64_url=$url" >> "$GITHUB_OUTPUT"
-                echo "macos_arm64_sha=$sha" >> "$GITHUB_OUTPUT"
-                ;;
-              *macos-x86_64)
-                echo "macos_x86_64_url=$url" >> "$GITHUB_OUTPUT"
-                echo "macos_x86_64_sha=$sha" >> "$GITHUB_OUTPUT"
-                ;;
-              *linux-arm64)
-                echo "linux_arm64_url=$url" >> "$GITHUB_OUTPUT"
-                echo "linux_arm64_sha=$sha" >> "$GITHUB_OUTPUT"
-                ;;
-              *linux-x86_64)
-                echo "linux_x86_64_url=$url" >> "$GITHUB_OUTPUT"
-                echo "linux_x86_64_sha=$sha" >> "$GITHUB_OUTPUT"
-                ;;
-            esac
+          BASE="https://github.com/${REPOSITORY}/releases/download/${TAG}"
+
+          for PLATFORM in macos-arm64 macos-x86_64 linux-arm64 linux-x86_64; do
+            FILE="mirage-proxy-v${VERSION}-${PLATFORM}"
+            URL="${BASE}/${FILE}"
+            echo "Downloading ${URL} ..."
+
+            # Retry because release assets can appear a little after workflow completion.
+            ok=false
+            for attempt in 1 2 3 4 5; do
+              if curl -fsSL "$URL" -o "/tmp/${FILE}"; then
+                ok=true
+                break
+              fi
+              echo "Attempt ${attempt} failed; retrying in 20s..."
+              sleep 20
+            done
+
+            if [ "$ok" != "true" ]; then
+              echo "Failed to download ${URL}"
+              exit 1
+            fi
+
+            SHA256="$(sha256sum "/tmp/${FILE}" | awk '{print $1}')"
+            KEY="${PLATFORM//-/_}"
+            echo "sha256_${KEY}=${SHA256}" >> "$GITHUB_OUTPUT"
           done
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout tap repository
         uses: actions/checkout@v4
@@ -78,40 +93,50 @@ jobs:
       - name: Update formula
         env:
           VERSION: ${{ steps.checksums.outputs.version }}
-          MACOS_ARM64_URL: ${{ steps.checksums.outputs.macos_arm64_url }}
-          MACOS_ARM64_SHA: ${{ steps.checksums.outputs.macos_arm64_sha }}
-          MACOS_X86_64_URL: ${{ steps.checksums.outputs.macos_x86_64_url }}
-          MACOS_X86_64_SHA: ${{ steps.checksums.outputs.macos_x86_64_sha }}
-          LINUX_ARM64_URL: ${{ steps.checksums.outputs.linux_arm64_url }}
-          LINUX_ARM64_SHA: ${{ steps.checksums.outputs.linux_arm64_sha }}
-          LINUX_X86_64_URL: ${{ steps.checksums.outputs.linux_x86_64_url }}
-          LINUX_X86_64_SHA: ${{ steps.checksums.outputs.linux_x86_64_sha }}
+          SHA256_MACOS_ARM64: ${{ steps.checksums.outputs.sha256_macos_arm64 }}
+          SHA256_MACOS_X86_64: ${{ steps.checksums.outputs.sha256_macos_x86_64 }}
+          SHA256_LINUX_ARM64: ${{ steps.checksums.outputs.sha256_linux_arm64 }}
+          SHA256_LINUX_X86_64: ${{ steps.checksums.outputs.sha256_linux_x86_64 }}
         run: |
           set -euo pipefail
-          ruby -e '
-            path = File.join("tap", ENV.fetch("FORMULA_PATH"))
-            content = File.read(path)
-            updated = content.gsub(/(version\s+")([^"]+)(")/, "\\1#{ENV.fetch("VERSION")}\\3")
+          cat > tap/${FORMULA_PATH} << EOF
+          class MirageProxy < Formula
+            desc "Invisible sensitive data filter for LLM APIs"
+            homepage "https://github.com/${REPOSITORY}"
+            version "${VERSION}"
+            license "MIT"
 
-            updated = updated.sub(
-              /(on_macos do\s+if Hardware::CPU\.arm\?\s+url\s+")([^"]+)("\s+sha256\s+")([0-9a-f]{64})(")/m,
-              "\\1#{ENV.fetch("MACOS_ARM64_URL")}\\3#{ENV.fetch("MACOS_ARM64_SHA")}\\5"
-            )
-            updated = updated.sub(
-              /(on_macos do\s+if Hardware::CPU\.arm\?\s+url\s+"[^"]+"\s+sha256\s+"[0-9a-f]{64}"\s+else\s+url\s+")([^"]+)("\s+sha256\s+")([0-9a-f]{64})(")/m,
-              "\\1#{ENV.fetch("MACOS_X86_64_URL")}\\3#{ENV.fetch("MACOS_X86_64_SHA")}\\5"
-            )
-            updated = updated.sub(
-              /(on_linux do\s+if Hardware::CPU\.arm\?\s+url\s+")([^"]+)("\s+sha256\s+")([0-9a-f]{64})(")/m,
-              "\\1#{ENV.fetch("LINUX_ARM64_URL")}\\3#{ENV.fetch("LINUX_ARM64_SHA")}\\5"
-            )
-            updated = updated.sub(
-              /(on_linux do\s+if Hardware::CPU\.arm\?\s+url\s+"[^"]+"\s+sha256\s+"[0-9a-f]{64}"\s+else\s+url\s+")([^"]+)("\s+sha256\s+")([0-9a-f]{64})(")/m,
-              "\\1#{ENV.fetch("LINUX_X86_64_URL")}\\3#{ENV.fetch("LINUX_X86_64_SHA")}\\5"
-            )
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPOSITORY}/releases/download/v#{version}/mirage-proxy-v#{version}-macos-arm64"
+                sha256 "${SHA256_MACOS_ARM64}"
+              else
+                url "https://github.com/${REPOSITORY}/releases/download/v#{version}/mirage-proxy-v#{version}-macos-x86_64"
+                sha256 "${SHA256_MACOS_X86_64}"
+              end
+            end
 
-            File.write(path, updated)
-          '
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPOSITORY}/releases/download/v#{version}/mirage-proxy-v#{version}-linux-arm64"
+                sha256 "${SHA256_LINUX_ARM64}"
+              else
+                url "https://github.com/${REPOSITORY}/releases/download/v#{version}/mirage-proxy-v#{version}-linux-x86_64"
+                sha256 "${SHA256_LINUX_X86_64}"
+              end
+            end
+
+            def install
+              binary = Dir["mirage-proxy-*"].first || "mirage-proxy"
+              bin.install binary => "mirage-proxy"
+            end
+
+            test do
+              assert_match "mirage-proxy", shell_output("#{bin}/mirage-proxy --version")
+            end
+          end
+          EOF
+          sed -i 's/^          //' tap/${FORMULA_PATH}
 
       - name: Commit and push formula update
         env:
