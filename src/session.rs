@@ -50,8 +50,13 @@ impl SessionManager {
             has_signal = true;
         }
 
-        // Use system prompt (first system message)
-        if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
+        // Use system prompt — Anthropic puts it top-level, OpenAI puts it in messages
+        if let Some(system) = body.get("system").and_then(|v| v.as_str()) {
+            // Anthropic Messages API: "system" is a top-level string
+            hasher.update(system.as_bytes());
+            has_signal = true;
+        } else if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
+            // OpenAI format: system message in the messages array
             for msg in messages {
                 if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
                     if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
