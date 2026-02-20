@@ -33,17 +33,40 @@ jobs:
             exit 1
           fi
 
-      - name: Calculate source tarball SHA256
-        id: checksum
+      - name: Calculate release asset SHA256 values
+        id: checksums
         run: |
           set -euo pipefail
-          URL="https://github.com/${REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          curl -fsSL "$URL" -o source.tar.gz
-          SHA256="$(sha256sum source.tar.gz | awk '{print $1}')"
           VERSION="${TAG#v}"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
-          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          for name in \
+            "mirage-proxy-${TAG}-macos-arm64" \
+            "mirage-proxy-${TAG}-macos-x86_64" \
+            "mirage-proxy-${TAG}-linux-arm64" \
+            "mirage-proxy-${TAG}-linux-x86_64"
+          do
+            url="https://github.com/${REPOSITORY}/releases/download/${TAG}/${name}"
+            curl -fsSL "$url" -o "$name"
+            sha="$(sha256sum "$name" | awk '{print $1}')"
+            case "$name" in
+              *macos-arm64)
+                echo "macos_arm64_url=$url" >> "$GITHUB_OUTPUT"
+                echo "macos_arm64_sha=$sha" >> "$GITHUB_OUTPUT"
+                ;;
+              *macos-x86_64)
+                echo "macos_x86_64_url=$url" >> "$GITHUB_OUTPUT"
+                echo "macos_x86_64_sha=$sha" >> "$GITHUB_OUTPUT"
+                ;;
+              *linux-arm64)
+                echo "linux_arm64_url=$url" >> "$GITHUB_OUTPUT"
+                echo "linux_arm64_sha=$sha" >> "$GITHUB_OUTPUT"
+                ;;
+              *linux-x86_64)
+                echo "linux_x86_64_url=$url" >> "$GITHUB_OUTPUT"
+                echo "linux_x86_64_sha=$sha" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          done
 
       - name: Checkout tap repository
         uses: actions/checkout@v4
@@ -54,29 +77,45 @@ jobs:
 
       - name: Update formula
         env:
-          URL: ${{ steps.checksum.outputs.url }}
-          SHA256: ${{ steps.checksum.outputs.sha256 }}
-          VERSION: ${{ steps.checksum.outputs.version }}
+          VERSION: ${{ steps.checksums.outputs.version }}
+          MACOS_ARM64_URL: ${{ steps.checksums.outputs.macos_arm64_url }}
+          MACOS_ARM64_SHA: ${{ steps.checksums.outputs.macos_arm64_sha }}
+          MACOS_X86_64_URL: ${{ steps.checksums.outputs.macos_x86_64_url }}
+          MACOS_X86_64_SHA: ${{ steps.checksums.outputs.macos_x86_64_sha }}
+          LINUX_ARM64_URL: ${{ steps.checksums.outputs.linux_arm64_url }}
+          LINUX_ARM64_SHA: ${{ steps.checksums.outputs.linux_arm64_sha }}
+          LINUX_X86_64_URL: ${{ steps.checksums.outputs.linux_x86_64_url }}
+          LINUX_X86_64_SHA: ${{ steps.checksums.outputs.linux_x86_64_sha }}
         run: |
           set -euo pipefail
           ruby -e '
             path = File.join("tap", ENV.fetch("FORMULA_PATH"))
             content = File.read(path)
-            updated = content.dup
+            updated = content.gsub(/(version\s+")([^"]+)(")/, "\\1#{ENV.fetch("VERSION")}\\3")
 
-            updated.sub!(/^\s*url\s+"[^"]+"/, %{  url "#{ENV.fetch("URL")}"}) || abort("Could not find url line")
-            updated.sub!(/^\s*sha256\s+"[0-9a-f]{64}"/, %{  sha256 "#{ENV.fetch("SHA256")}"}) || abort("Could not find sha256 line")
-
-            if updated.match?(/^\s*version\s+"/)
-              updated.sub!(/^\s*version\s+"[^"]+"/, %{  version "#{ENV.fetch("VERSION")}"})
-            end
+            updated = updated.sub(
+              /(on_macos do\s+if Hardware::CPU\.arm\?\s+url\s+")([^"]+)("\s+sha256\s+")([0-9a-f]{64})(")/m,
+              "\\1#{ENV.fetch("MACOS_ARM64_URL")}\\3#{ENV.fetch("MACOS_ARM64_SHA")}\\5"
+            )
+            updated = updated.sub(
+              /(on_macos do\s+if Hardware::CPU\.arm\?\s+url\s+"[^"]+"\s+sha256\s+"[0-9a-f]{64}"\s+else\s+url\s+")([^"]+)("\s+sha256\s+")([0-9a-f]{64})(")/m,
+              "\\1#{ENV.fetch("MACOS_X86_64_URL")}\\3#{ENV.fetch("MACOS_X86_64_SHA")}\\5"
+            )
+            updated = updated.sub(
+              /(on_linux do\s+if Hardware::CPU\.arm\?\s+url\s+")([^"]+)("\s+sha256\s+")([0-9a-f]{64})(")/m,
+              "\\1#{ENV.fetch("LINUX_ARM64_URL")}\\3#{ENV.fetch("LINUX_ARM64_SHA")}\\5"
+            )
+            updated = updated.sub(
+              /(on_linux do\s+if Hardware::CPU\.arm\?\s+url\s+"[^"]+"\s+sha256\s+"[0-9a-f]{64}"\s+else\s+url\s+")([^"]+)("\s+sha256\s+")([0-9a-f]{64})(")/m,
+              "\\1#{ENV.fetch("LINUX_X86_64_URL")}\\3#{ENV.fetch("LINUX_X86_64_SHA")}\\5"
+            )
 
             File.write(path, updated)
           '
 
       - name: Commit and push formula update
         env:
-          VERSION: ${{ steps.checksum.outputs.version }}
+          VERSION: ${{ steps.checksums.outputs.version }}
         run: |
           set -euo pipefail
           cd tap
