@@ -1,6 +1,6 @@
 # mirage-proxy
 
-A fast, invisible PII redaction proxy for LLM APIs. Written in Rust.
+A fast, invisible sensitive data filter for LLM APIs. Written in Rust.
 
 Your coding agent reads your `.env`, your codebase, your credentials — and sends all of it to the cloud. Mirage sits between your client and the provider, silently replacing sensitive data with plausible fakes. The LLM never knows. Your secrets never leave.
 

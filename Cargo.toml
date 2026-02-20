@@ -2,10 +2,10 @@
 name = "mirage-proxy"
 version = "0.1.0"
 edition = "2021"
-description = "A fast, lightweight PII redaction proxy for LLM APIs"
+description = "Invisible sensitive data filter for LLM APIs — secrets, credentials, and PII replaced with plausible fakes"
 license = "MIT"
 repository = "https://github.com/chandika/mirage-proxy"
-keywords = ["pii", "privacy", "llm", "proxy", "redaction"]
+keywords = ["security", "privacy", "llm", "proxy", "secrets"]
 categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]

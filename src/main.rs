@@ -26,9 +26,9 @@ use vault::Vault;
 #[command(
     name = "mirage-proxy",
     version,
-    about = "A fast PII redaction proxy for LLM APIs",
-    long_about = "Mirage sits between your LLM client and provider, automatically redacting \
-    PII and secrets from requests and rehydrating them in responses. \
+    about = "Invisible sensitive data filter for LLM APIs",
+    long_about = "Mirage sits between your LLM client and provider, silently replacing \
+    secrets, credentials, and sensitive data with plausible fakes. The LLM never knows. \
     Sub-millisecond overhead. Zero config. Works with any OpenAI-compatible client."
 )]
 struct Args {
