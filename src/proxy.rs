@@ -145,6 +145,9 @@ pub async fn handle_request(
 
     let status = response.status();
     let resp_headers = response.headers().clone();
+    let ct = resp_headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("none");
+    debug!("← {} {} ({})", status.as_u16(), status.canonical_reason().unwrap_or(""), ct);
+
     let is_stream = resp_headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -169,18 +172,12 @@ async fn handle_regular_response(
 
     state.stats.add_response(body_bytes.len() as u64);
 
+    // Rehydrate: replace fakes back to originals in the response
+    // Use string replacement on raw bytes to avoid JSON re-serialization artifacts
     let rehydrated_body = if !body_bytes.is_empty() && !state.config.dry_run {
-        match serde_json::from_slice::<Value>(&body_bytes) {
-            Ok(mut json) => {
-                rehydrate_json_value(&mut json, &faker);
-                serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec())
-            }
-            Err(_) => {
-                let text = String::from_utf8_lossy(&body_bytes);
-                let rehydrated = faker.rehydrate(&text);
-                rehydrated.into_bytes()
-            }
-        }
+        let text = String::from_utf8_lossy(&body_bytes);
+        let rehydrated = faker.rehydrate(&text);
+        rehydrated.into_bytes()
     } else {
         body_bytes.to_vec()
     };
