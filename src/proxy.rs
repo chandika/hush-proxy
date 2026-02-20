@@ -677,6 +677,9 @@ const SKIP_REDACT_KEYS: &[&str] = &[
     "message_id", "conversation_id", "thread_id",
     "run_id", "assistant_id", "file_id", "batch_id",
     "tool_call_id", "tool_use_id",
+    // Cryptographic / signed envelopes (must remain byte-exact)
+    "signature", "encrypted_content", "encrypted_input", "ciphertext",
+    "proof", "attestation", "nonce", "iv", "tag", "mac",
     // Request structure
     "tool_choice", "response_format", "format",
     "encoding_format", "modalities",
