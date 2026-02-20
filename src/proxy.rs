@@ -90,7 +90,8 @@ async fn forward_request(
     state: Arc<ProxyState>,
     faker: Arc<Faker>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
-    let (target_url, _) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(path) {
+    let is_chatgpt = headers.contains_key("chatgpt-account-id");
+    let (target_url, _) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(path, is_chatgpt) {
         (format!("{}{}", upstream.trim_end_matches('/'), remaining), remaining)
     } else if !state.target_url.is_empty() {
         (format!("{}{}", state.target_url.trim_end_matches('/'), path), path.to_string())
@@ -266,7 +267,8 @@ pub async fn handle_request(
     };
 
     // Resolve target: check provider routing first, then fall back to --target
-    let (target_url, forward_path) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(&path) {
+    let is_chatgpt = headers.contains_key("chatgpt-account-id");
+    let (target_url, forward_path) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(&path, is_chatgpt) {
         (format!("{}{}", upstream.trim_end_matches('/'), remaining), remaining)
     } else if !state.target_url.is_empty() {
         (format!("{}{}", state.target_url.trim_end_matches('/'), &path), path.clone())

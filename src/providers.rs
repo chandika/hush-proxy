@@ -54,7 +54,11 @@ pub static PROVIDERS: &[Provider] = &[
 /// If a provider prefix matches, strip it and return the upstream.
 /// Falls back to auto-detection for common API paths.
 /// Returns None if nothing matches (use --target fallback).
-pub fn resolve_provider(path: &str) -> Option<(&'static str, String)> {
+///
+/// `is_chatgpt_account`: true if the request has a `chatgpt-account-id` header,
+/// indicating it uses ChatGPT account auth (e.g. Codex CLI with ChatGPT Plus).
+/// These requests go to chatgpt.com/backend-api/codex/* instead of api.openai.com.
+pub fn resolve_provider(path: &str, is_chatgpt_account: bool) -> Option<(&'static str, String)> {
     // Explicit prefix match
     for p in PROVIDERS {
         if path.starts_with(p.prefix) {
@@ -64,14 +68,28 @@ pub fn resolve_provider(path: &str) -> Option<(&'static str, String)> {
         }
     }
 
-    // Auto-detect OpenAI paths.
+    // ChatGPT account auth (Codex CLI with ChatGPT Plus/Pro/Team subscription)
+    // Routes to chatgpt.com/backend-api/codex/* instead of api.openai.com
+    if is_chatgpt_account {
+        // /responses → /backend-api/codex/responses
+        // /models → /backend-api/codex/models
+        if path.starts_with("/responses")
+            || path.starts_with("/models")
+        {
+            return Some(("https://chatgpt.com", format!("/backend-api/codex{}", path)));
+        }
+        // /v1/* → strip /v1 and route to /backend-api/codex/*
+        if path.starts_with("/v1/") {
+            return Some(("https://chatgpt.com", format!("/backend-api/codex{}", &path[3..])));
+        }
+    }
+
+    // Standard OpenAI API paths (API key auth)
     // /v1/* passes through as-is (client already includes prefix).
-    // /responses is the new Responses API — does NOT use /v1/ prefix.
-    // Other bare paths like /chat/completions, /models get /v1 prepended.
     if path.starts_with("/v1/") {
         return Some(("https://api.openai.com", path.to_string()));
     }
-    // Responses API: forward as-is (no /v1/ prefix — different auth scopes)
+    // /responses — Responses API (no /v1/ prefix for API key auth)
     if path.starts_with("/responses") {
         return Some(("https://api.openai.com", path.to_string()));
     }
