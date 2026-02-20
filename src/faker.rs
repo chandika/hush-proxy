@@ -1,34 +1,36 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Generates plausible fake values for masked PII categories.
+use crate::redactor::PiiKind;
+
+/// Generates plausible fake values that match the original's length and format.
+/// The LLM never knows redaction happened — invisible substitution.
 /// Consistent within a session — same input always gets same fake.
 pub struct Faker {
-    email_map: Mutex<FakerMap>,
-    phone_map: Mutex<FakerMap>,
+    maps: Mutex<FakerMaps>,
 }
 
-struct FakerMap {
-    forward: HashMap<String, String>,
-    reverse: HashMap<String, String>,
+struct FakerMaps {
+    forward: HashMap<String, String>,  // original -> fake
+    reverse: HashMap<String, String>,  // fake -> original
     counter: usize,
 }
 
-impl FakerMap {
+impl FakerMaps {
     fn new() -> Self {
-        FakerMap {
+        FakerMaps {
             forward: HashMap::new(),
             reverse: HashMap::new(),
             counter: 0,
         }
     }
 
-    fn get_or_insert(&mut self, original: &str, generator: impl Fn(usize) -> String) -> String {
+    fn get_or_insert(&mut self, original: &str, generator: impl Fn(usize, &str) -> String) -> String {
         if let Some(fake) = self.forward.get(original) {
             return fake.clone();
         }
         self.counter += 1;
-        let fake = generator(self.counter);
+        let fake = generator(self.counter, original);
         self.forward.insert(original.to_string(), fake.clone());
         self.reverse.insert(fake.clone(), original.to_string());
         fake
@@ -36,7 +38,10 @@ impl FakerMap {
 
     fn rehydrate(&self, text: &str) -> String {
         let mut result = text.to_string();
-        for (fake, original) in &self.reverse {
+        // Sort by length descending to avoid partial replacements
+        let mut pairs: Vec<_> = self.reverse.iter().collect();
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        for (fake, original) in pairs {
             result = result.replace(fake, original);
         }
         result
@@ -44,56 +49,264 @@ impl FakerMap {
 }
 
 static FAKE_DOMAINS: &[&str] = &[
-    "example.com", "example.org", "example.net", "test.com",
-    "sample.org", "demo.net", "placeholder.com",
+    "mailbox.org", "proton.me", "fastmail.com", "outlook.com",
+    "yahoo.com", "icloud.com", "gmail.com", "hotmail.com",
+    "zoho.com", "aol.com", "mail.com", "yandex.com",
 ];
 
-static FAKE_FIRST_NAMES: &[&str] = &[
-    "alex", "jordan", "taylor", "morgan", "casey",
-    "riley", "avery", "quinn", "blake", "drew",
+static FAKE_NAMES: &[&str] = &[
+    "alex", "jordan", "taylor", "morgan", "casey", "riley",
+    "avery", "quinn", "blake", "drew", "jamie", "robin",
+    "sam", "pat", "chris", "lee", "kim", "dana", "jess", "max",
+];
+
+static FAKE_SURNAMES: &[&str] = &[
+    "miller", "wilson", "moore", "taylor", "anderson", "thomas",
+    "jackson", "white", "harris", "martin", "garcia", "clark",
+    "lewis", "walker", "hall", "young", "king", "wright",
 ];
 
 impl Faker {
     pub fn new() -> Self {
         Faker {
-            email_map: Mutex::new(FakerMap::new()),
-            phone_map: Mutex::new(FakerMap::new()),
+            maps: Mutex::new(FakerMaps::new()),
         }
     }
 
-    pub fn fake_email(&self, original: &str) -> String {
-        let mut map = self.email_map.lock().unwrap();
-        map.get_or_insert(original, |n| {
-            let name = FAKE_FIRST_NAMES[n % FAKE_FIRST_NAMES.len()];
-            let domain = FAKE_DOMAINS[n % FAKE_DOMAINS.len()];
-            format!("{}{}@{}", name, n, domain)
-        })
-    }
-
-    pub fn fake_phone(&self, original: &str) -> String {
-        let mut map = self.phone_map.lock().unwrap();
-        map.get_or_insert(original, |n| {
-            // Generate a fake phone in similar format
-            let area = 200 + (n % 800);
-            let mid = 100 + (n * 7 % 900);
-            let last = 1000 + (n * 13 % 9000);
-            // Try to preserve the original format
-            if original.contains('(') {
-                format!("({}) {}-{}", area, mid, last)
-            } else if original.contains('-') {
-                format!("{}-{}-{}", area, mid, last)
-            } else if original.contains('.') {
-                format!("{}.{}.{}", area, mid, last)
-            } else {
-                format!("{}{}{}", area, mid, last)
+    /// Generate a plausible fake for any PII kind, matching format and length
+    pub fn fake(&self, original: &str, kind: &PiiKind) -> String {
+        let mut maps = self.maps.lock().unwrap();
+        maps.get_or_insert(original, |n, orig| {
+            match kind {
+                PiiKind::Email => fake_email(n, orig),
+                PiiKind::Phone => fake_phone(n, orig),
+                PiiKind::CreditCard => fake_credit_card(n, orig),
+                PiiKind::Ssn => fake_ssn(n),
+                PiiKind::IpAddress => fake_ip(n),
+                PiiKind::AwsKey => fake_aws_key(n),
+                PiiKind::GithubToken => fake_prefixed_token(n, orig),
+                PiiKind::GenericApiKey => fake_prefixed_token(n, orig),
+                PiiKind::BearerToken => fake_bearer(n, orig),
+                PiiKind::ConnectionString => fake_connection_string(n, orig),
+                PiiKind::PrivateKey => fake_private_key(orig),
+                PiiKind::HighEntropy => fake_high_entropy(n, orig),
             }
         })
     }
 
+    /// Rehydrate: restore fakes back to originals
     pub fn rehydrate(&self, text: &str) -> String {
-        let result = self.email_map.lock().unwrap().rehydrate(text);
-        self.phone_map.lock().unwrap().rehydrate(&result)
+        self.maps.lock().unwrap().rehydrate(text)
     }
+}
+
+/// Deterministic pseudo-random char from a seed
+fn seeded_char(seed: usize, charset: &[u8]) -> char {
+    charset[seed % charset.len()] as char
+}
+
+fn seeded_digit(seed: usize) -> char {
+    b"0123456789"[seed % 10] as char
+}
+
+fn seeded_alnum(seed: usize) -> char {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    CHARS[seed % CHARS.len()] as char
+}
+
+/// Generate fake string matching length with alphanumeric chars
+fn fake_alnum_string(n: usize, len: usize) -> String {
+    (0..len).map(|i| seeded_alnum(n * 31 + i * 7)).collect()
+}
+
+// --- Per-kind fakers ---
+
+fn fake_email(n: usize, original: &str) -> String {
+    let name = FAKE_NAMES[n % FAKE_NAMES.len()];
+    let surname = FAKE_SURNAMES[(n * 7) % FAKE_SURNAMES.len()];
+    let domain = FAKE_DOMAINS[(n * 3) % FAKE_DOMAINS.len()];
+
+    let fake = format!("{}.{}@{}", name, surname, domain);
+
+    // Try to match original length by adjusting
+    if fake.len() < original.len() {
+        let diff = original.len() - fake.len();
+        let padding: String = (0..diff).map(|i| seeded_digit(n + i)).collect();
+        format!("{}.{}{}@{}", name, surname, padding, domain)
+    } else {
+        fake
+    }
+}
+
+fn fake_phone(n: usize, original: &str) -> String {
+    let area = 200 + (n * 37 % 800);
+    let mid = 100 + (n * 53 % 900);
+    let last = 1000 + (n * 71 % 9000);
+
+    // Preserve the format of the original
+    if original.starts_with('+') {
+        let country = if original.starts_with("+1") { "+1" } else { "+1" };
+        if original.contains('(') {
+            format!("{} ({}) {}-{}", country, area, mid, last)
+        } else if original.contains('-') {
+            format!("{}-{}-{}-{}", country, area, mid, last)
+        } else {
+            format!("{}{}{}{}", country, area, mid, last)
+        }
+    } else if original.contains('(') {
+        format!("({}) {}-{}", area, mid, last)
+    } else if original.contains('-') {
+        format!("{}-{}-{}", area, mid, last)
+    } else if original.contains('.') {
+        format!("{}.{}.{}", area, mid, last)
+    } else if original.contains(' ') {
+        format!("{} {} {}", area, mid, last)
+    } else {
+        format!("{}{}{}", area, mid, last)
+    }
+}
+
+fn fake_credit_card(n: usize, original: &str) -> String {
+    // Preserve prefix type (4=Visa, 5=MC, 3=Amex, 6=Discover)
+    let first = original.chars().next().unwrap_or('4');
+    let digits: String = std::iter::once(first)
+        .chain((1..16).map(|i| seeded_digit(n * 13 + i)))
+        .collect();
+
+    // Preserve separator format
+    if original.contains('-') {
+        format!("{}-{}-{}-{}", &digits[0..4], &digits[4..8], &digits[8..12], &digits[12..16])
+    } else if original.contains(' ') {
+        format!("{} {} {} {}", &digits[0..4], &digits[4..8], &digits[8..12], &digits[12..16])
+    } else {
+        digits
+    }
+}
+
+fn fake_ssn(n: usize) -> String {
+    let a = 100 + (n * 37 % 900);
+    let b = 10 + (n * 53 % 90);
+    let c = 1000 + (n * 71 % 9000);
+    format!("{}-{}-{}", a, b, c)
+}
+
+fn fake_ip(n: usize) -> String {
+    let a = 10 + (n * 37 % 246);
+    let b = (n * 53) % 256;
+    let c = (n * 71) % 256;
+    let d = 1 + (n * 97 % 254);
+    format!("{}.{}.{}.{}", a, b, c, d)
+}
+
+fn fake_aws_key(n: usize) -> String {
+    // AKIA + 16 uppercase alphanumeric
+    let suffix: String = (0..16).map(|i| {
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        CHARS[(n * 31 + i * 7) % CHARS.len()] as char
+    }).collect();
+    format!("AKIA{}", suffix)
+}
+
+fn fake_prefixed_token(n: usize, original: &str) -> String {
+    // Preserve prefix (ghp_, sk-, sk-proj-, xox, AIza, etc.)
+    let prefixes = ["sk-proj-", "sk-", "ghp_", "ghs_", "gho_", "ghu_", "ghr_",
+                     "xoxb-", "xoxp-", "xoxa-", "xoxo-", "xoxr-", "xoxs-", "AIza"];
+
+    let mut prefix = "";
+    for p in &prefixes {
+        if original.starts_with(p) {
+            prefix = p;
+            break;
+        }
+    }
+
+    let suffix_len = original.len() - prefix.len();
+    let suffix = fake_alnum_string(n, suffix_len);
+    format!("{}{}", prefix, suffix)
+}
+
+fn fake_bearer(n: usize, original: &str) -> String {
+    // "Bearer " + token
+    let token_part = if original.len() > 7 { &original[7..] } else { original };
+    let fake_token = fake_alnum_string(n, token_part.len());
+    format!("Bearer {}", fake_token)
+}
+
+fn fake_connection_string(n: usize, original: &str) -> String {
+    // Preserve protocol, fake the credentials and host
+    let protocol = if original.starts_with("postgresql://") {
+        "postgresql://"
+    } else if original.starts_with("postgres://") {
+        "postgres://"
+    } else if original.starts_with("mysql://") {
+        "mysql://"
+    } else if original.starts_with("mongodb+srv://") {
+        "mongodb+srv://"
+    } else if original.starts_with("mongodb://") {
+        "mongodb://"
+    } else if original.starts_with("redis://") {
+        "redis://"
+    } else {
+        "postgres://"
+    };
+
+    let user = FAKE_NAMES[n % FAKE_NAMES.len()];
+    let pass = fake_alnum_string(n * 3, 12);
+    let host = format!("db{}.internal", n % 100);
+    let port = match protocol {
+        p if p.contains("postgres") => 5432,
+        p if p.contains("mysql") => 3306,
+        p if p.contains("mongo") => 27017,
+        p if p.contains("redis") => 6379,
+        _ => 5432,
+    };
+    let db = format!("app_{}", n % 50);
+
+    format!("{}{}:{}@{}:{}/{}", protocol, user, pass, host, port, db)
+}
+
+fn fake_private_key(original: &str) -> String {
+    // Preserve BEGIN/END markers, fake the content with matching length
+    let header = if original.contains("RSA") {
+        ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----")
+    } else if original.contains("EC") {
+        ("-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----")
+    } else {
+        ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----")
+    };
+
+    // Count content length between markers
+    let content_len = original.len().saturating_sub(header.0.len() + header.1.len() + 2);
+    let fake_content: String = (0..content_len)
+        .map(|i| {
+            if i % 65 == 64 { '\n' }
+            else {
+                const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                B64[i % B64.len()] as char
+            }
+        })
+        .collect();
+
+    format!("{}\n{}\n{}", header.0, fake_content, header.1)
+}
+
+fn fake_high_entropy(n: usize, original: &str) -> String {
+    // Match exact length with similar character set
+    let has_upper = original.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = original.chars().any(|c| c.is_ascii_lowercase());
+    let has_digit = original.chars().any(|c| c.is_ascii_digit());
+    let has_special = original.contains('+') || original.contains('/') || original.contains('=') || original.contains('_') || original.contains('-');
+
+    let mut charset: Vec<u8> = Vec::new();
+    if has_lower { charset.extend_from_slice(b"abcdefghijklmnopqrstuvwxyz"); }
+    if has_upper { charset.extend_from_slice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"); }
+    if has_digit { charset.extend_from_slice(b"0123456789"); }
+    if has_special { charset.extend_from_slice(b"+/=_-"); }
+    if charset.is_empty() { charset.extend_from_slice(b"abcdefghijklmnopqrstuvwxyz0123456789"); }
+
+    (0..original.len())
+        .map(|i| seeded_char(n * 31 + i * 7, &charset))
+        .collect()
 }
 
 #[cfg(test)]
@@ -101,34 +314,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_consistent_fake_email() {
+    fn test_consistent_fake() {
         let faker = Faker::new();
         let email = "real@company.com";
-        let fake1 = faker.fake_email(email);
-        let fake2 = faker.fake_email(email);
+        let fake1 = faker.fake(email, &PiiKind::Email);
+        let fake2 = faker.fake(email, &PiiKind::Email);
         assert_eq!(fake1, fake2);
         assert_ne!(fake1, email);
         assert!(fake1.contains('@'));
     }
 
     #[test]
-    fn test_consistent_fake_phone() {
+    fn test_phone_format_preserved() {
         let faker = Faker::new();
         let phone = "(555) 123-4567";
-        let fake1 = faker.fake_phone(phone);
-        let fake2 = faker.fake_phone(phone);
-        assert_eq!(fake1, fake2);
-        assert_ne!(fake1, phone);
-        assert!(fake1.contains('('));
+        let fake = faker.fake(phone, &PiiKind::Phone);
+        assert!(fake.contains('('));
+        assert!(fake.contains(')'));
+        assert!(fake.contains('-'));
+    }
+
+    #[test]
+    fn test_aws_key_format() {
+        let faker = Faker::new();
+        let key = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
+        let fake = faker.fake(&key, &PiiKind::AwsKey);
+        assert!(fake.starts_with("AKIA"));
+        assert_eq!(fake.len(), key.len());
+    }
+
+    #[test]
+    fn test_high_entropy_length_match() {
+        let faker = Faker::new();
+        let secret = "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6kL9";
+        let fake = faker.fake(secret, &PiiKind::HighEntropy);
+        assert_eq!(fake.len(), secret.len());
+        assert_ne!(fake, secret);
     }
 
     #[test]
     fn test_rehydrate() {
         let faker = Faker::new();
         let email = "real@company.com";
-        let fake = faker.fake_email(email);
+        let fake = faker.fake(email, &PiiKind::Email);
         let text = format!("Contact {}", fake);
         let rehydrated = faker.rehydrate(&text);
         assert_eq!(rehydrated, format!("Contact {}", email));
+    }
+
+    #[test]
+    fn test_ssn_format() {
+        let faker = Faker::new();
+        let ssn = "123-45-6789";
+        let fake = faker.fake(ssn, &PiiKind::Ssn);
+        assert_ne!(fake, ssn);
+        // Should match XXX-XX-XXXX format
+        let parts: Vec<&str> = fake.split('-').collect();
+        assert_eq!(parts.len(), 3);
+    }
+
+    #[test]
+    fn test_ip_format() {
+        let faker = Faker::new();
+        let ip = "192.168.1.100";
+        let fake = faker.fake(ip, &PiiKind::IpAddress);
+        assert_ne!(fake, ip);
+        let parts: Vec<&str> = fake.split('.').collect();
+        assert_eq!(parts.len(), 4);
+    }
+
+    #[test]
+    fn test_connection_string_protocol_preserved() {
+        let faker = Faker::new();
+        let conn = "mongodb+srv://admin:secret@cluster0.abc.mongodb.net/mydb";
+        let fake = faker.fake(conn, &PiiKind::ConnectionString);
+        assert!(fake.starts_with("mongodb+srv://"));
     }
 }

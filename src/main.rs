@@ -18,7 +18,6 @@ use audit::AuditLog;
 use config::Config;
 use faker::Faker;
 use proxy::{handle_request, ProxyState};
-use redactor::TokenMap;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -103,7 +102,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(ProxyState {
         target_url: cfg.target.clone(),
         client: Client::new(),
-        token_map: TokenMap::new(),
         faker: Faker::new(),
         config: cfg.clone(),
         audit_log,

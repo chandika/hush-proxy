@@ -12,12 +12,11 @@ use tracing::{debug, info, warn};
 use crate::audit::AuditLog;
 use crate::config::{Config, RedactAction};
 use crate::faker::Faker;
-use crate::redactor::{detect, TokenMap};
+use crate::redactor::detect;
 
 pub struct ProxyState {
     pub target_url: String,
     pub client: Client,
-    pub token_map: TokenMap,
     pub faker: Faker,
     pub config: Config,
     pub audit_log: Option<Arc<AuditLog>>,
@@ -240,16 +239,8 @@ fn smart_redact(text: &str, state: &ProxyState) -> String {
         }
 
         match action {
-            RedactAction::Redact => {
-                let token = state.token_map.get_or_insert(&entity.original, &entity.kind);
-                result = result.replace(&entity.original, &token);
-            }
-            RedactAction::Mask => {
-                let fake = match label {
-                    "EMAIL" => state.faker.fake_email(&entity.original),
-                    "PHONE" => state.faker.fake_phone(&entity.original),
-                    _ => state.token_map.get_or_insert(&entity.original, &entity.kind),
-                };
+            RedactAction::Redact | RedactAction::Mask => {
+                let fake = state.faker.fake(&entity.original, &entity.kind);
                 result = result.replace(&entity.original, &fake);
             }
             RedactAction::Warn => {
@@ -262,10 +253,9 @@ fn smart_redact(text: &str, state: &ProxyState) -> String {
     result
 }
 
-/// Rehydrate: restore both tokens and fakes
+/// Rehydrate: restore fakes back to originals
 fn rehydrate_all(text: &str, state: &ProxyState) -> String {
-    let result = state.token_map.rehydrate(text);
-    state.faker.rehydrate(&result)
+    state.faker.rehydrate(text)
 }
 
 /// Recursively redact PII in JSON values
