@@ -2,54 +2,50 @@
 
 **Invisible sensitive data filter for LLM APIs.** Single Rust binary, sub-millisecond overhead.
 
-**Now a native [OpenClaw](https://openclaw.ai) provider — install the skill in one command. [↓ Jump to OpenClaw](#openclaw-integration)**
+**Native [OpenClaw](https://openclaw.ai) provider — one command to install. [↓ Jump to OpenClaw](#openclaw)**
 
 Your coding agent reads your `.env`, your codebase, your credentials — and sends all of it to the cloud. Mirage sits between your client and the provider, silently replacing sensitive data with plausible fakes. The LLM never knows. Your secrets never leave.
 
 ```
-You:     "Deploy key is AKIAHOV29GNU18FMT07E, email chris.harris@gmail.com"
+You:     "Deploy key is AKIAOV29GNU18FMT07EL, email quinn.martin78@aol.com"
          ↓
-Mirage:  "Deploy key is AKIA7ELSZ6DKRY5CJQX4, email robin.thomas1234@aol.com"
+Mirage:  "Deploy key is AKIAELSZ6DKRY5CJQX4B, email riley.walker@outlook.com"
          ↓
 Provider: (sees only fake data, responds normally)
          ↓
 Mirage:  (swaps fakes back to originals in the response)
          ↓
-You:     "Done! I've drafted the deploy script for chris.harris@gmail.com"
+You:     "Done! I've drafted the deploy script for quinn.martin78@aol.com"
 ```
 
 No `[REDACTED]`. No `[[PERSON_1]]`. The provider sees a completely normal request with completely fake data. Responses are rehydrated transparently.
 
-## OpenClaw integration
+---
 
-Mirage is a **first-class OpenClaw provider**. If you're running [OpenClaw](https://openclaw.ai), install the skill from [ClawdHub](https://clawdhub.com) and every message your agent sends to Anthropic, OpenAI, or any other provider passes through Mirage first — automatically, with no extra configuration.
+## Table of Contents
 
-```bash
-# Install the mirage-proxy skill from ClawdHub
-clawdhub install mirage-proxy
-```
-
-The skill handles everything:
-
-- **Auto-start** — Mirage launches on container boot as a sidecar process
-- **Provider registration** — Registers `mirage-anthropic` as a custom provider routing through `localhost:8686`, with ready-to-use model aliases (`mirage-sonnet`, `mirage-haiku`, `mirage-opus`)
-- **Health monitoring** — Heartbeat checks restart Mirage if it dies on session compaction or restart
-- **Zero config** — Your existing OpenClaw sessions route through Mirage without touching a settings file
-
-Your agent's full context — codebase, memory files, tool outputs — gets filtered on every turn before it hits the provider. Secrets that were already in your `.env` or workspace files never leave clean.
-
-To use a miraged model in OpenClaw:
-
-```bash
-# In any session: switch to a filtered provider
-/model mirage-sonnet
-# or set it as default in your gateway config:
-# default_model: mirage-anthropic/claude-sonnet-4-6
-```
-
-The `mirage-anthropic/*` aliases behave identically to the direct Anthropic models — same capabilities, same latency profile, invisible filtering layer in between.
-
-> **Why this matters for OpenClaw users:** OpenClaw agents read your entire workspace — MEMORY.md, config files, daily notes, project repos. That's a lot of sensitive surface area hitting cloud APIs on every heartbeat. Mirage closes that gap without changing how your agent works.
+- [Why this matters](#why-this-matters)
+- [Install](#install)
+  - [OpenClaw](#openclaw)
+  - [Claude Code](#claude-code)
+  - [Codex / OpenAI](#codex--openai)
+  - [Cursor, Aider, Continue, OpenCode](#cursor-aider-continue-opencode)
+  - [All tools — manual setup](#all-tools--manual-setup)
+- [Multi-provider mode](#multi-provider-mode)
+- [Live output](#live-output)
+- [What it detects](#what-it-detects)
+- [Configuration](#configuration)
+- [Sessions](#sessions)
+- [Encrypted vault](#encrypted-vault)
+- [Dry run](#dry-run)
+- [Audit log](#audit-log)
+- [Streaming](#streaming)
+- [CLI reference](#cli-reference)
+- [How it compares](#how-it-compares)
+- [Architecture](#architecture)
+- [Building from source](#building-from-source)
+- [Roadmap](#roadmap)
+- [License](#license)
 
 ---
 
@@ -59,75 +55,226 @@ On Feb 14, 2026, a critical vulnerability ([CVE-2026-21852](https://nvd.nist.gov
 
 Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends your full codebase to the cloud. If there's a secret in your repo, it's in someone's training data. Mirage fixes this at the network layer, no code changes required.
 
+---
+
 ## Install
 
+### OpenClaw
+
+Mirage is a **first-class OpenClaw provider**. The [ClawdHub](https://clawdhub.com) skill handles everything: downloads and verifies the binary, creates the auto-restart wrapper, starts the proxy, and registers `mirage-anthropic` as a provider with ready-to-use model aliases.
+
 ```bash
-# Homebrew (macOS & Linux)
-brew install chandika/tap/mirage-proxy
-# If a new tag was just released:
-brew update && brew upgrade mirage-proxy
-
-# Scoop (Windows)
-scoop bucket add chandika https://github.com/chandika/scoop-bucket
-scoop install mirage-proxy
-
-# Pre-built binaries (macOS, Linux, Windows)
-# → https://github.com/chandika/mirage-proxy/releases
-
-# Build from source
-cargo install --git https://github.com/chandika/mirage-proxy
+clawdhub install mirage-proxy
+bash ~/.openclaw/workspace/skills/mirage-proxy/setup.sh
 ```
 
-Release details: [`docs/releasing.md`](docs/releasing.md)
+After setup, ask your agent to patch the config, or do it manually:
 
-## Quick start
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "mirage-anthropic": {
+        "baseUrl": "http://127.0.0.1:8686/anthropic",
+        "api": "anthropic-messages",
+        "apiKey": "${ANTHROPIC_API_KEY}",
+        "models": [
+          { "id": "claude-opus-4-6",   "name": "Claude Opus 4.6 (mirage)",   "api": "anthropic-messages", "reasoning": true,  "contextWindow": 200000, "maxTokens": 32000 },
+          { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (mirage)", "api": "anthropic-messages", "reasoning": true,  "contextWindow": 200000, "maxTokens": 16000 },
+          { "id": "claude-haiku-3-6",  "name": "Claude Haiku 3.6 (mirage)",  "api": "anthropic-messages", "reasoning": false, "contextWindow": 200000, "maxTokens": 8192  }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "models": {
+        "mirage-anthropic/claude-opus-4-6":   { "alias": "mirage-opus" },
+        "mirage-anthropic/claude-sonnet-4-6": { "alias": "mirage-sonnet" },
+        "mirage-anthropic/claude-haiku-3-6":  { "alias": "mirage-haiku" }
+      }
+    }
+  }
+}
+```
 
-### Auto-setup (recommended)
+Then switch with `/model mirage-sonnet` — or set `mirage-anthropic/claude-sonnet-4-6` as your default model.
+
+**Persistence across restarts** — mirage dies when the OpenClaw container restarts. Two fixes:
+
+```yaml
+# docker-compose.yml (recommended)
+command: sh -c "nohup /home/node/.openclaw/workspace/start-mirage.sh > /dev/null 2>&1 & exec openclaw start"
+```
+
+Or add a heartbeat check to `HEARTBEAT.md`:
+```bash
+curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8686/
+# 502 or 404 = running. 000 = restart via start-mirage.sh
+```
+
+> **Why this matters for OpenClaw users:** OpenClaw agents read your entire workspace — MEMORY.md, config files, daily notes, project repos. That's a significant amount of sensitive surface area hitting cloud APIs on every heartbeat. Mirage closes that gap without changing how your agent works.
+
+---
+
+### Claude Code
+
+```bash
+# 1. Install
+brew install chandika/tap/mirage-proxy   # macOS/Linux
+# or: cargo install --git https://github.com/chandika/mirage-proxy
+
+# 2. Auto-configure (recommended)
+mirage-proxy --setup
+```
+
+`--setup` detects Claude Code and writes the correct config automatically. To verify it worked:
+
+```bash
+cat ~/.claude/settings.json | grep ANTHROPIC_BASE_URL
+# Should show: "ANTHROPIC_BASE_URL": "http://localhost:8686"
+```
+
+Manual config if you prefer:
+
+```json
+// ~/.claude/settings.json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8686"
+  }
+}
+```
+
+Then start mirage in a separate terminal (or background it):
+
+```bash
+mirage-proxy --target https://api.anthropic.com
+```
+
+Claude Code routes through mirage transparently. No changes to your workflow.
+
+---
+
+### Codex / OpenAI
+
+```bash
+# 1. Install
+brew install chandika/tap/mirage-proxy
+# or: cargo install --git https://github.com/chandika/mirage-proxy
+
+# 2. Start in multi-provider mode (handles both API key and ChatGPT auth)
+mirage-proxy
+
+# 3. Point Codex at mirage
+export OPENAI_BASE_URL=http://localhost:8686
+```
+
+Or via `--setup`:
 
 ```bash
 mirage-proxy --setup
 ```
 
-Scans for installed LLM tools (Claude Code, Cursor, Codex, Aider) and configures them to route through Mirage automatically. Edits config files, sets environment variables, done.
+**ChatGPT Plus/Pro/Team (subscription auth):** Mirage detects the `chatgpt-account-id` header and automatically routes to `chatgpt.com/backend-api/codex/*` — the backend Codex CLI actually uses when you're authenticated via ChatGPT subscription (not api.openai.com). No extra config needed.
 
-To undo: `mirage-proxy --uninstall`
+**Codex in OpenClaw:** For OAuth-based providers where no API key env var exists, override the built-in `baseUrl` instead of creating a custom provider:
 
-### Manual setup
-
-```bash
-# 1. Start mirage, pointing at your provider
-mirage-proxy --target https://api.anthropic.com
-
-# 2. Point your tool at mirage (localhost:8686)
-export ANTHROPIC_BASE_URL=http://localhost:8686
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "openai-codex": {
+        "baseUrl": "http://127.0.0.1:8686"
+      }
+    }
+  }
+}
 ```
 
-### Per-tool examples
+> ⚠️ Do **not** add `"apiKey": "${OPENAI_API_KEY}"` to custom providers unless that env var exists in your container — it will crash OpenClaw on startup.
 
-**Claude Code:**
-```bash
-mirage-proxy --target https://api.anthropic.com
-# Auto-configured by --setup, or manually:
-# ~/.claude/settings.json → { "env": { "ANTHROPIC_BASE_URL": "http://localhost:8686" } }
+---
+
+### Cursor, Aider, Continue, OpenCode
+
+All of these tools support custom provider base URLs. Point them at `http://localhost:8686` and start mirage in multi-provider mode.
+
+**Cursor:**
+
+```json
+// Settings → AI → Base URL
+// Or in .cursor/settings.json:
+{
+  "anthropic.apiBaseUrl": "http://localhost:8686/anthropic",
+  "openai.apiBaseUrl": "http://localhost:8686"
+}
 ```
 
-**Codex / OpenAI:**
+**Aider:**
+
 ```bash
-# Multi-provider mode (no --target needed):
+mirage-proxy  # start first, no --target needed
+
+# Anthropic models:
+ANTHROPIC_BASE_URL=http://localhost:8686 aider --model claude-sonnet-4-6
+
+# OpenAI models:
+OPENAI_BASE_URL=http://localhost:8686 aider --model gpt-4o
+```
+
+**Continue:**
+
+```json
+// ~/.continue/config.json
+{
+  "models": [{
+    "provider": "anthropic",
+    "apiBase": "http://localhost:8686/anthropic",
+    "model": "claude-sonnet-4-6"
+  }]
+}
+```
+
+**OpenCode / any OpenAI-compatible tool:**
+
+```bash
+export OPENAI_BASE_URL=http://localhost:8686
+```
+
+---
+
+### All tools — manual setup
+
+```bash
+# Install
+brew install chandika/tap/mirage-proxy        # Homebrew (macOS & Linux)
+scoop bucket add chandika https://github.com/chandika/scoop-bucket
+scoop install mirage-proxy                    # Scoop (Windows)
+cargo install --git https://github.com/chandika/mirage-proxy  # From source
+
+# Pre-built binaries → https://github.com/chandika/mirage-proxy/releases
+
+# Start pointing at a specific provider
+mirage-proxy --target https://api.anthropic.com
+
+# Or in multi-provider mode (routes automatically based on path/header)
 mirage-proxy
-export OPENAI_BASE_URL=http://localhost:8686
 
-# Or single-provider mode:
-mirage-proxy --target https://api.openai.com
-export OPENAI_BASE_URL=http://localhost:8686
+# Auto-configure all detected tools in one shot
+mirage-proxy --setup
+
+# Undo
+mirage-proxy --uninstall
 ```
 
-> **Codex CLI with ChatGPT Plus/Pro/Team:** Mirage automatically detects ChatGPT account auth and routes to the correct backend (`chatgpt.com/backend-api/codex/*`). Works with both API key and ChatGPT subscription auth — no extra config needed.
+Release details: [`docs/releasing.md`](docs/releasing.md)
 
-**Cursor / Continue / Aider / OpenCode:**
-Point the provider base URL to `http://localhost:8686`. Everything else works as before.
+---
 
-### Multi-provider mode
+## Multi-provider mode
 
 Without `--target`, Mirage acts as a multi-provider proxy. Route to any provider using path prefixes:
 
@@ -149,7 +296,7 @@ mirage-proxy  # no --target
 Mirage shows a clean live display — no log spam, just what matters:
 
 ```
-  mirage-proxy v0.3.0
+  mirage-proxy v0.5.15
   ─────────────────────────────────────
   listen:  http://127.0.0.1:8686
   target:  https://api.anthropic.com
@@ -175,7 +322,7 @@ Mirage shows a clean live display — no log spam, just what matters:
 
 | Type | Example | Detection |
 |---|---|---|
-| AWS Access Keys | `AKIAHOV29GNU18FMT07E` | Prefix `AKIA`, `ASIA`, `ABIA`, `ACCA` |
+| AWS Access Keys | `AKIAOV29GNU18FMT07EL` | Prefix `AKIA`, `ASIA`, `ABIA`, `ACCA` |
 | GitHub Tokens | `ghp_xxxxxxxxxxxx` | Prefix `ghp_`, `ghs_`, `gho_`, `ghu_`, `ghr_` |
 | OpenAI API Keys | `sk-proj-abc123...` | Prefix `sk-proj-`, `sk-ant-` |
 | Google API Keys | `AIzaSyA...` | Prefix `AIza` |
@@ -191,11 +338,11 @@ Mirage shows a clean live display — no log spam, just what matters:
 
 | Type | Original | Fake |
 |---|---|---|
-| Email | `taylor.hall@gmail.com` | `robin.thomas1234@aol.com` |
-| Phone (intl) | `+1-570-630-1710` | `+1-533-577-1639` |
-| Phone (US) | `(496) 524-1568` | `(459) 471-1497` |
-| SSN | `322-58-1426` | `285-95-1355` |
-| Credit Card | `4345 6789 0123 4567` | `4012 3456 7890 1234` |
+| Email | `kim.anderson@mailbox.org` | `riley.walker@outlook.com` |
+| Phone (intl) | `+1-288-472-2704` | `+1-251-419-2633` |
+| Phone (US) | `(214) 366-2562` | `(977) 313-2491` |
+| SSN | `840-80-2420` | `803-27-2349` |
+| Credit Card | `4567 8901 2345 6789` | `4234 5678 9012 3456` |
 | IP Address | `10.0.1.42` | `172.18.3.97` |
 
 ### How fakes work
@@ -206,7 +353,7 @@ Every fake **matches the format and length** of the original:
 - A phone number keeps its country code and formatting
 - A credit card keeps its issuer prefix and passes Luhn validation
 
-**Session consistency:** Within a conversation, `taylor.hall@gmail.com` always maps to the same fake. The LLM's context stays coherent. Different conversations get different fakes.
+**Session consistency:** Within a conversation, `kim.anderson@mailbox.org` always maps to the same fake. The LLM's context stays coherent. Different conversations get different fakes.
 
 ## Configuration
 
@@ -219,7 +366,6 @@ bind: "127.0.0.1"
 sensitivity: medium   # low | medium | high | paranoid
 
 rules:
-  # Always redact — LLM never needs the real value
   always_redact:
     - SSN
     - CREDIT_CARD
@@ -228,19 +374,14 @@ rules:
     - GITHUB_TOKEN
     - API_KEY
     - BEARER_TOKEN
-
-  # Replace with plausible fakes
   mask:
     - EMAIL
     - PHONE
-
-  # Log but don't modify (too context-dependent)
   warn_only:
     - IP_ADDRESS
     - CONNECTION_STRING
     - SECRET
 
-# Never redact these patterns
 allowlist:
   - "192.168.1.*"
   - "sk-test-*"
@@ -249,16 +390,14 @@ allowlist:
 audit:
   enabled: true
   path: "./mirage-audit.jsonl"
-  log_values: false     # true = log original values (for debugging only!)
+  log_values: false
 
 dry_run: false
 
 update_check:
   enabled: true
-  timeout_ms: 1200      # network timeout (check runs in background)
+  timeout_ms: 1200
 ```
-
-Update results are cached for 24h to avoid checking on every startup.
 
 ### Sensitivity levels
 
@@ -285,10 +424,8 @@ For explicit session control, add `"mirage_session": "my-session-id"` to request
 Persist mappings across restarts so conversations stay consistent:
 
 ```bash
-# With passphrase
 mirage-proxy --target https://api.anthropic.com --vault-key "my-passphrase"
-
-# Via environment variable
+# or:
 MIRAGE_VAULT_KEY="my-passphrase" mirage-proxy --target https://api.anthropic.com
 ```
 
@@ -304,7 +441,7 @@ See what would be caught without modifying traffic:
 mirage-proxy --target https://api.anthropic.com --dry-run
 ```
 
-Requests pass through unmodified. Detections are still logged to the audit file and shown in the live display. Use this to verify detection accuracy before going live.
+Requests pass through unmodified. Detections are still logged to the audit file and shown in the live display.
 
 ## Audit log
 
@@ -435,11 +572,12 @@ Only high-confidence, low-false-positive patterns are included. Generic "keyword
 - [x] Homebrew distribution (auto-updated formula on release)
 - [x] Pre-built binaries for macOS, Linux, Windows
 - [x] **Native OpenClaw integration (ClawdHub skill)**
+- [x] Binary SHA256 verification in installer
 - [ ] Custom pattern definitions in config
 - [ ] Allowlist/blocklist glob matching
 - [ ] Optional ONNX NER for name/organization detection
 - [ ] Route mode (sensitive requests → local model)
-- [ ] npm / scoop distribution
+- [ ] npm / Scoop distribution
 
 ## License
 
