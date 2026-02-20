@@ -13,15 +13,15 @@ use crate::audit::AuditLog;
 use crate::config::{Config, RedactAction};
 use crate::faker::Faker;
 use crate::redactor::detect;
+use crate::session::SessionManager;
 use crate::vault::Vault;
 
 pub struct ProxyState {
     pub target_url: String,
     pub client: Client,
-    pub faker: Faker,
+    pub sessions: SessionManager,
     pub config: Config,
     pub audit_log: Option<Arc<AuditLog>>,
-    pub vault: Option<Arc<Vault>>,
 }
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -61,22 +61,25 @@ pub async fn handle_request(
         }
     };
 
-    // Redact PII in request body (JSON)
-    let redacted_body = if !body_bytes.is_empty() {
+    // Parse JSON to derive session ID, then redact with session-scoped faker
+    let (redacted_body, session_faker) = if !body_bytes.is_empty() {
         match serde_json::from_slice::<Value>(&body_bytes) {
             Ok(mut json) => {
-                redact_json_value(&mut json, &state);
-                debug!("Redacted request body");
-                serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec())
+                let session_id = SessionManager::derive_session_id(&json);
+                let faker = state.sessions.get_faker(&session_id);
+                debug!("Session: {} — redacting request", session_id);
+                redact_json_value(&mut json, &state, &faker);
+                (serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()), faker)
             }
             Err(_) => {
+                let faker = state.sessions.get_faker("default");
                 let text = String::from_utf8_lossy(&body_bytes);
-                let redacted = smart_redact(&text, &state);
-                redacted.into_bytes()
+                let redacted = smart_redact(&text, &state, &faker);
+                (redacted.into_bytes(), faker)
             }
         }
     } else {
-        body_bytes.to_vec()
+        (body_bytes.to_vec(), state.sessions.get_faker("default"))
     };
 
     // In dry-run mode, forward the original body
@@ -126,9 +129,9 @@ pub async fn handle_request(
         .unwrap_or(false);
 
     if is_stream {
-        handle_streaming_response(status, resp_headers, response, state).await
+        handle_streaming_response(status, resp_headers, response, state, session_faker).await
     } else {
-        handle_regular_response(status, resp_headers, response, state).await
+        handle_regular_response(status, resp_headers, response, state, session_faker).await
     }
 }
 
@@ -137,18 +140,19 @@ async fn handle_regular_response(
     resp_headers: reqwest::header::HeaderMap,
     response: reqwest::Response,
     state: Arc<ProxyState>,
+    faker: Arc<Faker>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let body_bytes = response.bytes().await.unwrap_or_default();
 
     let rehydrated_body = if !body_bytes.is_empty() && !state.config.dry_run {
         match serde_json::from_slice::<Value>(&body_bytes) {
             Ok(mut json) => {
-                rehydrate_json_value(&mut json, &state);
+                rehydrate_json_value(&mut json, &faker);
                 serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec())
             }
             Err(_) => {
                 let text = String::from_utf8_lossy(&body_bytes);
-                let rehydrated = rehydrate_all(&text, &state);
+                let rehydrated = faker.rehydrate(&text);
                 rehydrated.into_bytes()
             }
         }
@@ -179,6 +183,7 @@ async fn handle_streaming_response(
     resp_headers: reqwest::header::HeaderMap,
     response: reqwest::Response,
     state: Arc<ProxyState>,
+    faker: Arc<Faker>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, hyper::Error>>(32);
 
@@ -191,7 +196,7 @@ async fn handle_streaming_response(
                     let rehydrated = if state.config.dry_run {
                         text.to_string()
                     } else {
-                        rehydrate_all(&text, &state)
+                        faker.rehydrate(&text)
                     };
                     let frame = Frame::data(Bytes::from(rehydrated));
                     if tx.send(Ok(frame)).await.is_err() {
@@ -227,7 +232,7 @@ async fn handle_streaming_response(
 }
 
 /// Smart redaction: uses config to decide action per PII kind
-fn smart_redact(text: &str, state: &ProxyState) -> String {
+fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
     let entities = detect(text);
     let mut result = text.to_string();
 
@@ -242,7 +247,7 @@ fn smart_redact(text: &str, state: &ProxyState) -> String {
 
         match action {
             RedactAction::Redact | RedactAction::Mask => {
-                let fake = state.faker.fake(&entity.original, &entity.kind);
+                let fake = faker.fake(&entity.original, &entity.kind);
                 result = result.replace(&entity.original, &fake);
             }
             RedactAction::Warn => {
@@ -255,45 +260,40 @@ fn smart_redact(text: &str, state: &ProxyState) -> String {
     result
 }
 
-/// Rehydrate: restore fakes back to originals
-fn rehydrate_all(text: &str, state: &ProxyState) -> String {
-    state.faker.rehydrate(text)
-}
-
 /// Recursively redact PII in JSON values
-fn redact_json_value(value: &mut Value, state: &ProxyState) {
+fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
     match value {
         Value::String(s) => {
-            *s = smart_redact(s, state);
+            *s = smart_redact(s, state, faker);
         }
         Value::Array(arr) => {
             for item in arr {
-                redact_json_value(item, state);
+                redact_json_value(item, state, faker);
             }
         }
         Value::Object(obj) => {
             for (_, v) in obj.iter_mut() {
-                redact_json_value(v, state);
+                redact_json_value(v, state, faker);
             }
         }
         _ => {}
     }
 }
 
-/// Recursively rehydrate PII tokens in JSON values
-fn rehydrate_json_value(value: &mut Value, state: &ProxyState) {
+/// Recursively rehydrate PII fakes in JSON values
+fn rehydrate_json_value(value: &mut Value, faker: &Faker) {
     match value {
         Value::String(s) => {
-            *s = rehydrate_all(s, state);
+            *s = faker.rehydrate(s);
         }
         Value::Array(arr) => {
             for item in arr {
-                rehydrate_json_value(item, state);
+                rehydrate_json_value(item, faker);
             }
         }
         Value::Object(obj) => {
             for (_, v) in obj.iter_mut() {
-                rehydrate_json_value(v, state);
+                rehydrate_json_value(v, faker);
             }
         }
         _ => {}

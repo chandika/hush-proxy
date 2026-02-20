@@ -11,6 +11,7 @@ use crate::vault::Vault;
 pub struct Faker {
     maps: Mutex<FakerMaps>,
     vault: Option<Arc<Vault>>,
+    session_id: Option<String>,
 }
 
 struct FakerMaps {
@@ -70,10 +71,22 @@ static FAKE_SURNAMES: &[&str] = &[
 ];
 
 impl Faker {
-    pub fn new(vault: Option<Arc<Vault>>) -> Self {
+    pub fn new(vault: Option<Arc<Vault>>, session_id: Option<String>) -> Self {
+        // Load existing mappings from vault for this session
+        let mut maps = FakerMaps::new();
+        if let (Some(ref vault), Some(ref sid)) = (&vault, &session_id) {
+            let pairs = vault.get_session_mappings(sid);
+            for (original, fake) in pairs {
+                maps.forward.insert(original.clone(), fake.clone());
+                maps.reverse.insert(fake, original);
+                maps.counter += 1;
+            }
+        }
+
         Faker {
-            maps: Mutex::new(FakerMaps::new()),
+            maps: Mutex::new(maps),
             vault,
+            session_id,
         }
     }
 
@@ -108,9 +121,10 @@ impl Faker {
             }
         });
 
-        // Persist to vault
+        // Persist to vault with session scope
         if let Some(ref vault) = self.vault {
-            vault.put(original, &fake, kind.label());
+            let sid = self.session_id.as_deref().unwrap_or("default");
+            vault.put_session(sid, original, &fake, kind.label());
         }
 
         fake
@@ -337,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_consistent_fake() {
-        let faker = Faker::new(None);
+        let faker = Faker::new(None, None);
         let email = "real@company.com";
         let fake1 = faker.fake(email, &PiiKind::Email);
         let fake2 = faker.fake(email, &PiiKind::Email);
@@ -348,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_phone_format_preserved() {
-        let faker = Faker::new(None);
+        let faker = Faker::new(None, None);
         let phone = "(555) 123-4567";
         let fake = faker.fake(phone, &PiiKind::Phone);
         assert!(fake.contains('('));
@@ -358,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_aws_key_format() {
-        let faker = Faker::new(None);
+        let faker = Faker::new(None, None);
         let key = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
         let fake = faker.fake(&key, &PiiKind::AwsKey);
         assert!(fake.starts_with("AKIA"));
@@ -367,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_high_entropy_length_match() {
-        let faker = Faker::new(None);
+        let faker = Faker::new(None, None);
         let secret = "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6kL9";
         let fake = faker.fake(secret, &PiiKind::HighEntropy);
         assert_eq!(fake.len(), secret.len());
@@ -376,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_rehydrate() {
-        let faker = Faker::new(None);
+        let faker = Faker::new(None, None);
         let email = "real@company.com";
         let fake = faker.fake(email, &PiiKind::Email);
         let text = format!("Contact {}", fake);
@@ -386,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_ssn_format() {
-        let faker = Faker::new(None);
+        let faker = Faker::new(None, None);
         let ssn = "123-45-6789";
         let fake = faker.fake(ssn, &PiiKind::Ssn);
         assert_ne!(fake, ssn);
@@ -397,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_ip_format() {
-        let faker = Faker::new(None);
+        let faker = Faker::new(None, None);
         let ip = "192.168.1.100";
         let fake = faker.fake(ip, &PiiKind::IpAddress);
         assert_ne!(fake, ip);
@@ -407,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_connection_string_protocol_preserved() {
-        let faker = Faker::new(None);
+        let faker = Faker::new(None, None);
         let conn = "mongodb+srv://admin:secret@cluster0.abc.mongodb.net/mydb";
         let fake = faker.fake(conn, &PiiKind::ConnectionString);
         assert!(fake.starts_with("mongodb+srv://"));

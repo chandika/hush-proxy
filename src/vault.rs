@@ -25,12 +25,20 @@ pub struct Vault {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct VaultInner {
-    /// original -> fake
+    /// session_id -> { original -> entry }
+    sessions: HashMap<String, SessionMap>,
+    /// Global reverse map: fake -> (session_id, original)
+    reverse: HashMap<String, (String, String)>,
+    /// Legacy non-session forward map (backward compat)
+    #[serde(default)]
     forward: HashMap<String, VaultEntry>,
-    /// fake -> original
-    reverse: HashMap<String, String>,
     /// Total mappings since last flush
     ops_since_flush: usize,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct SessionMap {
+    entries: HashMap<String, VaultEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +96,51 @@ impl Vault {
         key
     }
 
-    /// Store a mapping (original -> fake)
+    /// Store a session-scoped mapping
+    pub fn put_session(&self, session_id: &str, original: &str, fake: &str, kind: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let session = inner.sessions.entry(session_id.to_string()).or_default();
+
+        if let Some(entry) = session.entries.get_mut(original) {
+            entry.last_used = now;
+            entry.use_count += 1;
+        } else {
+            session.entries.insert(original.to_string(), VaultEntry {
+                fake: fake.to_string(),
+                kind: kind.to_string(),
+                created_at: now.clone(),
+                last_used: now,
+                use_count: 1,
+            });
+            inner.reverse.insert(fake.to_string(), (session_id.to_string(), original.to_string()));
+        }
+
+        inner.ops_since_flush += 1;
+
+        if self.auto_flush && inner.ops_since_flush >= self.flush_threshold {
+            if let Err(e) = self.persist_inner(&inner) {
+                warn!("Auto-flush failed: {}", e);
+            } else {
+                inner.ops_since_flush = 0;
+            }
+        }
+    }
+
+    /// Get all mappings for a session (for loading into a Faker)
+    pub fn get_session_mappings(&self, session_id: &str) -> Vec<(String, String)> {
+        let inner = self.inner.lock().unwrap();
+        inner.sessions.get(session_id)
+            .map(|s| {
+                s.entries.iter()
+                    .map(|(original, entry)| (original.clone(), entry.fake.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Store a mapping (original -> fake) — legacy global scope
     pub fn put(&self, original: &str, fake: &str, kind: &str) {
         let mut inner = self.inner.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -104,7 +156,7 @@ impl Vault {
                 last_used: now,
                 use_count: 1,
             });
-            inner.reverse.insert(fake.to_string(), original.to_string());
+            inner.reverse.insert(fake.to_string(), ("_global".to_string(), original.to_string()));
         }
 
         inner.ops_since_flush += 1;
@@ -127,16 +179,15 @@ impl Vault {
     /// Look up original for a fake value (for rehydration)
     pub fn get_original(&self, fake: &str) -> Option<String> {
         let inner = self.inner.lock().unwrap();
-        inner.reverse.get(fake).cloned()
+        inner.reverse.get(fake).map(|(_, original)| original.clone())
     }
 
     /// Get all reverse mappings for rehydration
     pub fn reverse_map(&self) -> Vec<(String, String)> {
         let inner = self.inner.lock().unwrap();
         let mut pairs: Vec<_> = inner.reverse.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(fake, (_, original))| (fake.clone(), original.clone()))
             .collect();
-        // Sort by fake length descending to avoid partial replacements
         pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
         pairs
     }

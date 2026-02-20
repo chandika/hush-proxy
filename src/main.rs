@@ -3,6 +3,7 @@ mod config;
 mod faker;
 mod proxy;
 mod redactor;
+mod session;
 mod vault;
 
 use clap::Parser;
@@ -17,8 +18,8 @@ use tracing::{error, info};
 
 use audit::AuditLog;
 use config::Config;
-use faker::Faker;
 use proxy::{handle_request, ProxyState};
+use session::SessionManager;
 use vault::Vault;
 
 #[derive(Parser, Debug)]
@@ -127,10 +128,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(ProxyState {
         target_url: cfg.target.clone(),
         client: Client::new(),
-        faker: Faker::new(vault.clone()),
+        sessions: SessionManager::new(vault.clone()),
         config: cfg.clone(),
         audit_log,
-        vault: vault.clone(),
     });
 
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse()?;
