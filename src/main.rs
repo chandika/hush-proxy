@@ -4,6 +4,7 @@ mod faker;
 mod proxy;
 mod redactor;
 mod session;
+mod setup;
 mod vault;
 
 use clap::Parser;
@@ -71,6 +72,14 @@ struct Args {
     /// Flush vault after N new mappings (0 = manual only)
     #[arg(long, default_value = "50")]
     vault_flush_threshold: usize,
+
+    /// Run setup wizard to auto-configure LLM tools
+    #[arg(long)]
+    setup: bool,
+
+    /// Remove mirage configuration from all tools
+    #[arg(long)]
+    uninstall: bool,
 }
 
 #[tokio::main]
@@ -83,6 +92,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log_level)),
         )
         .init();
+
+    // Handle setup command
+    if args.setup || args.uninstall {
+        let port = args.port.unwrap_or(8686);
+        setup::run_setup(port, args.uninstall);
+        return Ok(());
+    }
 
     // Load config, then override with CLI args
     let mut cfg = Config::load(args.config.as_deref());
