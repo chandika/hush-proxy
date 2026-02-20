@@ -33,8 +33,8 @@ Every LLM coding tool — Claude Code, Codex, Cursor, Aider, Continue — sends 
 # Or build from source
 cargo install --git https://github.com/chandika/mirage-proxy
 
-# Or via crates.io (v0.5.13 publishing ~Feb 21 2026)
-cargo install mirage-proxy
+# crates.io (currently outdated — use git install above)
+# cargo install mirage-proxy
 ```
 
 ## Quick start
