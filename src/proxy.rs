@@ -328,23 +328,58 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
 }
 
 /// Recursively redact PII in JSON values
-/// JSON keys that should NEVER be redacted — auth tokens, model names, metadata
+/// JSON keys that should NEVER be redacted.
+/// Auth, config, IDs, metadata — anything that isn't user content.
 const SKIP_REDACT_KEYS: &[&str] = &[
-    "api_key", "apikey", "api-key",
-    "authorization", "auth", "token",
+    // Auth
+    "api_key", "apikey", "api-key", "api_secret",
+    "authorization", "auth", "token", "bearer",
     "x-api-key", "x_api_key",
-    "secret_key", "secret",
+    "secret_key", "secret", "credentials",
     "access_token", "refresh_token",
-    "session_token", "session_key",
-    "bearer", "credentials",
-    "model", "stream",
-    "anthropic-version", "openai-organization",
+    "session_token", "session_key", "session_id",
+    // Model/provider config
+    "model", "stream", "max_tokens", "temperature",
+    "top_p", "top_k", "stop", "seed",
+    "anthropic-version", "anthropic_version",
+    "openai-organization", "openai_organization",
+    // IDs and references (can look like high-entropy secrets)
+    "id", "object", "type", "role", "name",
+    "previous_response_id", "response_id",
+    "message_id", "conversation_id", "thread_id",
+    "run_id", "assistant_id", "file_id", "batch_id",
+    "tool_call_id", "tool_use_id",
+    // Request structure
+    "tool_choice", "response_format", "format",
+    "encoding_format", "modalities",
+    "truncation", "store", "metadata",
+    "service_tier", "user",
+    // mirage internal
     "mirage_session",
+];
+
+/// Keys whose VALUES are user content and SHOULD be redacted.
+/// Everything else in the object is skipped — we only recurse into these.
+const CONTENT_KEYS: &[&str] = &[
+    "content", "text", "messages", "system", "input",
+    "instructions", "description", "prompt",
+    "tools", "tool_results", "tool_result",
 ];
 
 fn should_skip_key(key: &str) -> bool {
     let lower = key.to_lowercase();
-    SKIP_REDACT_KEYS.iter().any(|&k| lower == k)
+    // If it's a known content key, always recurse into it
+    if CONTENT_KEYS.iter().any(|&k| lower == k) {
+        return false;
+    }
+    // If it's a known skip key, skip it
+    if SKIP_REDACT_KEYS.iter().any(|&k| lower == k) {
+        return true;
+    }
+    // For unknown keys: skip if the key name suggests it's an ID or config
+    lower.ends_with("_id") || lower.ends_with("_key") || lower.ends_with("_token")
+        || lower.ends_with("_secret") || lower.ends_with("_url") || lower.ends_with("_uri")
+        || lower.starts_with("x-") || lower.starts_with("x_")
 }
 
 fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
