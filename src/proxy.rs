@@ -18,6 +18,41 @@ use crate::session::SessionManager;
 use crate::stats::Stats;
 use crate::vault::Vault;
 
+/// Decompress a body based on content-encoding
+fn decompress_body(data: &[u8], encoding: &str) -> Result<Vec<u8>, String> {
+    match encoding {
+        "zstd" => {
+            zstd::decode_all(std::io::Cursor::new(data))
+                .map_err(|e| format!("zstd decode error: {}", e))
+        }
+        "gzip" => {
+            use std::io::Read;
+            let mut decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(data));
+            let mut buf = Vec::new();
+            decoder.read_to_end(&mut buf).map_err(|e| format!("gzip decode error: {}", e))?;
+            Ok(buf)
+        }
+        other => Err(format!("unsupported encoding: {}", other)),
+    }
+}
+
+/// Compress a body back to the specified encoding
+fn compress_body(data: &[u8], encoding: &str) -> Result<Vec<u8>, String> {
+    match encoding {
+        "zstd" => {
+            zstd::encode_all(std::io::Cursor::new(data), 3)
+                .map_err(|e| format!("zstd encode error: {}", e))
+        }
+        "gzip" => {
+            use std::io::Write;
+            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(data).map_err(|e| format!("gzip encode error: {}", e))?;
+            encoder.finish().map_err(|e| format!("gzip finish error: {}", e))
+        }
+        other => Err(format!("unsupported encoding: {}", other)),
+    }
+}
+
 pub struct ProxyState {
     pub target_url: String,
     pub client: Client,
@@ -44,6 +79,69 @@ fn error_response(status: StatusCode, msg: &str) -> Response<BoxBody> {
         .header("content-type", "application/json")
         .body(full_body(Bytes::from(body.to_string())))
         .unwrap()
+}
+
+/// Fast-path: forward request without inspection (when decompression fails)
+async fn forward_request(
+    method: hyper::Method,
+    path: &str,
+    headers: &hyper::HeaderMap,
+    body: Vec<u8>,
+    state: Arc<ProxyState>,
+    faker: Arc<Faker>,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    let (target_url, _) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(path) {
+        (format!("{}{}", upstream.trim_end_matches('/'), remaining), remaining)
+    } else if !state.target_url.is_empty() {
+        (format!("{}{}", state.target_url.trim_end_matches('/'), path), path.to_string())
+    } else {
+        return Ok(error_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("No provider configured for path: {}", path),
+        ));
+    };
+
+    debug!("▶ fast-forward {} {} → {} ({} bytes, no inspection)", method, path, target_url, body.len());
+
+    let mut forward = state.client.request(method.clone(), &target_url);
+    for (name, value) in headers.iter() {
+        let name_str = name.as_str().to_lowercase();
+        match name_str.as_str() {
+            "host" | "connection" | "transfer-encoding" | "content-length" => continue,
+            _ => {
+                if let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
+                    if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_ref()) {
+                        forward = forward.header(n, v);
+                    }
+                }
+            }
+        }
+    }
+    forward = forward.body(body);
+
+    let response = match forward.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            warn!("Upstream request failed: {}", e);
+            return Ok(error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {}", e)));
+        }
+    };
+
+    let status = response.status();
+    let resp_headers = response.headers().clone();
+    let ct = resp_headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("none");
+    debug!("← {} {} ({})", status.as_u16(), status.canonical_reason().unwrap_or(""), ct);
+
+    let is_stream = resp_headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    if is_stream {
+        handle_streaming_response(status, resp_headers, response, state, faker).await
+    } else {
+        handle_regular_response(status, resp_headers, response, state, faker).await
+    }
 }
 
 /// Handle an incoming request: redact PII, forward to target, rehydrate response
@@ -83,10 +181,37 @@ pub async fn handle_request(
 
     state.stats.add_request(body_bytes.len() as u64);
 
+    // Check for compressed body (zstd, gzip, etc.) — decompress for inspection, forward original
+    let content_encoding = headers.get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    let is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
+
+    let inspect_bytes = if is_compressed {
+        debug!("body is compressed ({}), {} bytes — decompressing for inspection", content_encoding, body_bytes.len());
+        match decompress_body(&body_bytes, &content_encoding) {
+            Ok(decompressed) => {
+                debug!("decompressed: {} bytes → {} bytes", body_bytes.len(), decompressed.len());
+                decompressed
+            }
+            Err(e) => {
+                warn!("failed to decompress {} body: {} — forwarding as-is without inspection", content_encoding, e);
+                // Can't inspect, just forward original
+                let (_, faker) = state.sessions.get_faker("default");
+                // Skip to forwarding
+                return forward_request(method, &path, &headers, body_bytes.to_vec(), state, faker).await;
+            }
+        }
+    } else {
+        body_bytes.to_vec()
+    };
+
     // Parse JSON to derive session ID, then redact with session-scoped faker
-    let (redacted_body, session_faker) = if !body_bytes.is_empty() {
-        match serde_json::from_slice::<Value>(&body_bytes) {
+    let (redacted_body, session_faker) = if !inspect_bytes.is_empty() {
+        match serde_json::from_slice::<Value>(&inspect_bytes) {
             Ok(mut json) => {
+                debug!("parsed JSON body OK ({} bytes)", inspect_bytes.len());
                 let session_id = SessionManager::derive_session_id(&json);
                 let (is_new, faker) = state.sessions.get_faker(&session_id);
                 if is_new {
@@ -96,13 +221,37 @@ pub async fn handle_request(
                     eprint!("\r\x1b[2K  📎 session: {}\n", session_id);
                 }
                 redact_json_value(&mut json, &state, &faker);
-                (serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()), faker)
+                if is_compressed {
+                    // Re-compress redacted JSON back to original encoding
+                    let redacted_json = serde_json::to_vec(&json).unwrap_or_else(|_| inspect_bytes.clone());
+                    debug!("re-compressing redacted body ({} bytes) with {}", redacted_json.len(), content_encoding);
+                    match compress_body(&redacted_json, &content_encoding) {
+                        Ok(compressed) => {
+                            debug!("re-compressed: {} bytes → {} bytes", redacted_json.len(), compressed.len());
+                            (compressed, faker)
+                        }
+                        Err(e) => {
+                            warn!("failed to re-compress body: {} — forwarding original", e);
+                            (body_bytes.to_vec(), faker)
+                        }
+                    }
+                } else {
+                    (serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()), faker)
+                }
             }
-            Err(_) => {
+            Err(e) => {
+                debug!("body is not valid JSON: {} — treating as text ({} bytes)", e, inspect_bytes.len());
                 let (_, faker) = state.sessions.get_faker("default");
-                let text = String::from_utf8_lossy(&body_bytes);
+                let text = String::from_utf8_lossy(&inspect_bytes);
                 let redacted = smart_redact(&text, &state, &faker);
-                (redacted.into_bytes(), faker)
+                if is_compressed {
+                    match compress_body(redacted.as_bytes(), &content_encoding) {
+                        Ok(compressed) => (compressed, faker),
+                        Err(_) => (body_bytes.to_vec(), faker),
+                    }
+                } else {
+                    (redacted.into_bytes(), faker)
+                }
             }
         }
     } else {
@@ -129,20 +278,39 @@ pub async fn handle_request(
         ));
     };
     let _ = forward_path; // used for clarity, target_url has the full URL
+
+    debug!("▶ forwarding {} {} → {}", method, path, target_url);
+    debug!("  forward body: {} bytes (compressed: {})", forward_body.len(), is_compressed);
+
     let mut forward = state.client.request(method.clone(), &target_url);
 
+    let mut forwarded_headers = Vec::new();
     for (name, value) in headers.iter() {
         let name_str = name.as_str().to_lowercase();
         match name_str.as_str() {
-            "host" | "connection" | "transfer-encoding" | "content-length" => continue,
+            "host" | "connection" | "transfer-encoding" | "content-length" => {
+                debug!("  ⊘ skipping header: {}", name_str);
+                continue;
+            }
             _ => {
                 if let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
                     if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_ref()) {
+                        forwarded_headers.push(format!("{}: {}", name_str,
+                            if name_str == "authorization" || name_str == "x-api-key" {
+                                let val = value.to_str().unwrap_or("***");
+                                if val.len() > 12 { format!("{}...{}", &val[..8], &val[val.len()-4..]) } else { "***".to_string() }
+                            } else {
+                                value.to_str().unwrap_or("<binary>").to_string()
+                            }
+                        ));
                         forward = forward.header(n, v);
                     }
                 }
             }
         }
+    }
+    for h in &forwarded_headers {
+        debug!("  → {}", h);
     }
 
     forward = forward.body(forward_body);
@@ -162,6 +330,14 @@ pub async fn handle_request(
     let resp_headers = response.headers().clone();
     let ct = resp_headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("none");
     debug!("← {} {} ({})", status.as_u16(), status.canonical_reason().unwrap_or(""), ct);
+
+    // Log full response body on error for diagnosis
+    if status.as_u16() >= 400 {
+        debug!("  ← response headers:");
+        for (name, value) in resp_headers.iter() {
+            debug!("    {}: {}", name.as_str(), value.to_str().unwrap_or("<binary>"));
+        }
+    }
 
     let is_stream = resp_headers
         .get("content-type")
@@ -186,6 +362,13 @@ async fn handle_regular_response(
     let body_bytes = response.bytes().await.unwrap_or_default();
 
     state.stats.add_response(body_bytes.len() as u64);
+
+    // Log error response bodies for debugging
+    if status.as_u16() >= 400 {
+        let body_preview = String::from_utf8_lossy(&body_bytes);
+        let preview = if body_preview.len() > 2000 { &body_preview[..2000] } else { &body_preview };
+        debug!("  ← error body: {}", preview);
+    }
 
     // Rehydrate: replace fakes back to originals in the response
     // Use string replacement on raw bytes to avoid JSON re-serialization artifacts
