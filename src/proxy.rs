@@ -52,7 +52,7 @@ pub async fn handle_request(
     let path = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
     let headers = req.headers().clone();
 
-    info!("{} {}", method, path);
+    debug!("{} {}", method, path);
 
     // Collect request body
     let body_bytes = match req.collect().await {
@@ -70,20 +70,23 @@ pub async fn handle_request(
         match serde_json::from_slice::<Value>(&body_bytes) {
             Ok(mut json) => {
                 let session_id = SessionManager::derive_session_id(&json);
-                let faker = state.sessions.get_faker(&session_id);
+                let (is_new, faker) = state.sessions.get_faker(&session_id);
+                if is_new {
+                    state.stats.add_session();
+                }
                 debug!("Session: {} — redacting request", session_id);
                 redact_json_value(&mut json, &state, &faker);
                 (serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()), faker)
             }
             Err(_) => {
-                let faker = state.sessions.get_faker("default");
+                let (_, faker) = state.sessions.get_faker("default");
                 let text = String::from_utf8_lossy(&body_bytes);
                 let redacted = smart_redact(&text, &state, &faker);
                 (redacted.into_bytes(), faker)
             }
         }
     } else {
-        (body_bytes.to_vec(), state.sessions.get_faker("default"))
+        (body_bytes.to_vec(), state.sessions.get_faker("default").1)
     };
 
     // In dry-run mode, forward the original body
@@ -148,6 +151,8 @@ async fn handle_regular_response(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let body_bytes = response.bytes().await.unwrap_or_default();
 
+    state.stats.add_response(body_bytes.len() as u64);
+
     let rehydrated_body = if !body_bytes.is_empty() && !state.config.dry_run {
         match serde_json::from_slice::<Value>(&body_bytes) {
             Ok(mut json) => {
@@ -191,11 +196,13 @@ async fn handle_streaming_response(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, hyper::Error>>(32);
 
+    let stats_clone = state.stats.clone();
     tokio::spawn(async move {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
+                    stats_clone.add_response(bytes.len() as u64);
                     let text = String::from_utf8_lossy(&bytes);
                     let rehydrated = if state.config.dry_run {
                         text.to_string()
@@ -235,36 +242,45 @@ async fn handle_streaming_response(
     Ok(builder.body(boxed).unwrap())
 }
 
-/// Smart redaction: uses config to decide action per PII kind
+/// Smart redaction: uses config to decide action per PII kind.
+/// Only counts and logs *new* detections — values already seen in this session are silently handled.
 fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
     let entities = detect(text);
     let mut result = text.to_string();
-    let mut redaction_count: u64 = 0;
+    let mut new_redaction_count: u64 = 0;
 
     for entity in &entities {
         let label = entity.kind.label();
         let action = state.config.should_redact(label);
+        let is_new = !faker.is_known(&entity.original);
 
-        // Audit log
-        if let Some(ref audit) = state.audit_log {
-            audit.log(label, &action, &entity.original, text);
+        // Only audit-log and count genuinely new detections
+        if is_new {
+            if let Some(ref audit) = state.audit_log {
+                audit.log(label, &action, &entity.original, text);
+            }
         }
 
         match action {
             RedactAction::Redact | RedactAction::Mask => {
                 let fake = faker.fake(&entity.original, &entity.kind);
                 result = result.replace(&entity.original, &fake);
-                redaction_count += 1;
+                if is_new {
+                    info!("🛡️  {} detected and masked", label);
+                    new_redaction_count += 1;
+                }
             }
             RedactAction::Warn => {
-                // Logged above, don't modify
+                if is_new {
+                    info!("⚠️  {} detected (warn-only)", label);
+                }
             }
             RedactAction::Ignore => {}
         }
     }
 
-    if redaction_count > 0 {
-        state.stats.add_redactions(redaction_count);
+    if new_redaction_count > 0 {
+        state.stats.add_redactions(new_redaction_count);
     }
 
     result

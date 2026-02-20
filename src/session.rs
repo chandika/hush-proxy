@@ -22,14 +22,18 @@ impl SessionManager {
     }
 
     /// Get or create a faker for a given session ID
-    pub fn get_faker(&self, session_id: &str) -> Arc<Faker> {
+    /// Get or create a faker for a given session ID.
+    /// Returns (is_new, faker) so callers can track new sessions.
+    pub fn get_faker(&self, session_id: &str) -> (bool, Arc<Faker>) {
         let mut sessions = self.sessions.lock().unwrap();
-        sessions
+        let is_new = !sessions.contains_key(session_id);
+        let faker = sessions
             .entry(session_id.to_string())
             .or_insert_with(|| {
                 Arc::new(Faker::new(self.vault.clone(), Some(session_id.to_string())))
             })
-            .clone()
+            .clone();
+        (is_new, faker)
     }
 
     /// Derive session ID from a request body.
@@ -50,11 +54,21 @@ impl SessionManager {
             has_signal = true;
         }
 
-        // Use system prompt — Anthropic puts it top-level, OpenAI puts it in messages
-        if let Some(system) = body.get("system").and_then(|v| v.as_str()) {
-            // Anthropic Messages API: "system" is a top-level string
-            hasher.update(system.as_bytes());
-            has_signal = true;
+        // Use system prompt — Anthropic puts it top-level (string or array), OpenAI puts it in messages
+        if let Some(system) = body.get("system") {
+            if let Some(s) = system.as_str() {
+                // Anthropic Messages API: "system" as a top-level string
+                hasher.update(s.as_bytes());
+                has_signal = true;
+            } else if let Some(arr) = system.as_array() {
+                // Anthropic Messages API: "system" as array of content blocks
+                for block in arr {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        hasher.update(text.as_bytes());
+                        has_signal = true;
+                    }
+                }
+            }
         } else if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
             // OpenAI format: system message in the messages array
             for msg in messages {

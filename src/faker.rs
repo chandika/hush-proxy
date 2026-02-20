@@ -40,6 +40,10 @@ impl FakerMaps {
         fake
     }
 
+    fn contains(&self, original: &str) -> bool {
+        self.forward.contains_key(original)
+    }
+
     fn rehydrate(&self, text: &str) -> String {
         let mut result = text.to_string();
         // Sort by length descending to avoid partial replacements
@@ -88,6 +92,11 @@ impl Faker {
             vault,
             session_id,
         }
+    }
+
+    /// Check if a value has already been seen/mapped in this session
+    pub fn is_known(&self, original: &str) -> bool {
+        self.maps.lock().unwrap().contains(original)
     }
 
     /// Generate a plausible fake for any PII kind, matching format and length
