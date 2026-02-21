@@ -34,6 +34,21 @@ brew install chandika/tap/mirage-proxy    # macOS / Linux
 mirage-proxy --service-install            # installs daemon + shell integration
 ```
 
+Before writing to shell profiles, install now:
+- shows exactly which files it may change (`~/.zshrc`, `~/.bashrc`, PowerShell profile)
+- asks for confirmation in interactive terminals
+- if you decline, it offers a `dry-run` install instead
+- wraps changes inside managed markers:
+  - `# >>> mirage-proxy >>>`
+  - `# <<< mirage-proxy <<<`
+- creates timestamped backups in `~/.mirage/backups/` for changed files
+
+For automation/non-interactive installs:
+
+```bash
+mirage-proxy --service-install --yes
+```
+
 Done. Mirage runs as a background service and is ON by default for new terminals.
 
 ```
@@ -107,6 +122,7 @@ mirage logs     # live tail of redactions and session events
 
 - `mirage-proxy --service-install` installs a daemon (launchd/systemd/Task Scheduler)
 - Shell integration exports provider base URLs in new terminals
+- Shell edits are scoped to a marked block and are reversible
 - `mirage on/off` only toggles env vars for the current shell
 - `mirage logs` is the easiest way to watch what is being redacted after install
 
@@ -301,6 +317,7 @@ mirage-proxy [OPTIONS]
       --dry-run                   Log detections without modifying traffic
       --vault-key <PASSPHRASE>    Vault passphrase (or MIRAGE_VAULT_KEY env)
       --service-install           Install background service + shell integration
+      --yes                       Skip interactive confirmation prompts
       --service-uninstall         Remove service + shell integration
       --service-status            Show daemon and filter status
       --list-providers            Show all 28+ built-in provider routes

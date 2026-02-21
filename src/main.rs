@@ -16,6 +16,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use reqwest::Client;
 use std::collections::HashSet;
+use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -85,6 +86,10 @@ struct Args {
     /// Install as background service + shell integration (launchd/systemd/Task Scheduler)
     #[arg(long)]
     service_install: bool,
+
+    /// Skip interactive confirmation prompts during install
+    #[arg(long)]
+    yes: bool,
 
     /// Uninstall background service + shell integration
     #[arg(long)]
@@ -305,8 +310,27 @@ fn service_install(args: &Args) -> Result<(), Box<dyn std::error::Error + Send +
     std::fs::create_dir_all(&mirage_home)?;
 
     let port = args.port.unwrap_or(8686);
+
+    eprintln!();
+    eprintln!("  \x1b[1mmirage-proxy\x1b[0m — installing service");
+    eprintln!("  ─────────────────────────────────────");
+
+    let shell_targets = shell_install_targets();
+    let mut effective_dry_run = args.dry_run;
+    match confirm_shell_integration(&shell_targets, &mirage_home, args.yes)? {
+        InstallDecision::Proceed => {}
+        InstallDecision::ProceedDryRun => {
+            effective_dry_run = true;
+            eprintln!("  Continuing with dry-run mode by request.");
+        }
+        InstallDecision::Cancel => {
+            eprintln!("  Install cancelled before making changes.");
+            return Ok(());
+        }
+    }
+
     let mut extra_args = Vec::new();
-    if args.dry_run {
+    if effective_dry_run {
         extra_args.push("--dry-run".to_string());
     }
     if let Some(ref s) = args.sensitivity {
@@ -314,15 +338,11 @@ fn service_install(args: &Args) -> Result<(), Box<dyn std::error::Error + Send +
         extra_args.push(s.clone());
     }
 
-    eprintln!();
-    eprintln!("  \x1b[1mmirage-proxy\x1b[0m — installing service");
-    eprintln!("  ─────────────────────────────────────");
-
     // Platform-specific daemon install
     install_daemon(&exe_str, port, &extra_args, &mirage_home)?;
 
     // Shell integration (env vars + mirage function + startup message)
-    install_shell(port)?;
+    let shell_changes = install_shell(port, &mirage_home, &shell_targets)?;
 
     eprintln!();
     eprintln!("  🛡️  mirage-proxy installed and running on :{}", port);
@@ -330,7 +350,7 @@ fn service_install(args: &Args) -> Result<(), Box<dyn std::error::Error + Send +
     eprintln!("  Every new terminal will route LLM traffic through mirage.");
     eprintln!("  To turn it off in a terminal:  mirage off");
     eprintln!("  To check status:               mirage status");
-    if args.dry_run {
+    if effective_dry_run {
         eprintln!();
         eprintln!("  ⚠️  Running in dry-run mode — detections logged but traffic not modified");
     }
@@ -338,14 +358,24 @@ fn service_install(args: &Args) -> Result<(), Box<dyn std::error::Error + Send +
     eprintln!("  Restart your shell or run:");
 
     // Detect which shell profiles were modified
-    let home = dirs_next::home_dir().unwrap();
-    if home.join(".zshrc").exists() {
+    let changed_paths: Vec<&std::path::PathBuf> = shell_changes
+        .iter()
+        .filter(|c| c.changed)
+        .map(|c| &c.path)
+        .collect();
+    if changed_paths.iter().any(|p| p.ends_with(".zshrc")) {
         eprintln!("    source ~/.zshrc");
-    } else if home.join(".bashrc").exists() {
+    } else if changed_paths.iter().any(|p| p.ends_with(".bashrc")) {
         eprintln!("    source ~/.bashrc");
     }
     if cfg!(windows) {
         eprintln!("    . $PROFILE");
+    }
+    if !shell_changes.is_empty() {
+        eprintln!();
+        eprintln!("  Rollback options:");
+        eprintln!("    mirage-proxy --service-uninstall");
+        eprintln!("    or restore backups from {}", mirage_home.join("backups").display());
     }
 
     // Show live tail of detections
@@ -920,36 +950,138 @@ function mirage {
 const PS_MARKER_START: &str = "# >>> mirage-proxy >>>";
 const PS_MARKER_END: &str = "# <<< mirage-proxy <<<";
 
-fn install_shell(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = port; // port is baked into the shell block constants (8686)
+struct ShellTarget {
+    path: std::path::PathBuf,
+    marker_start: &'static str,
+    marker_end: &'static str,
+    block: &'static str,
+}
+
+struct ShellWriteResult {
+    path: std::path::PathBuf,
+    changed: bool,
+    backup_path: Option<std::path::PathBuf>,
+}
+
+enum InstallDecision {
+    Proceed,
+    ProceedDryRun,
+    Cancel,
+}
+
+fn shell_install_targets() -> Vec<ShellTarget> {
     let home = dirs_next::home_dir().unwrap();
+    let mut targets = Vec::new();
     let mut installed_any = false;
 
-    // bash/zsh profiles
-    let shell_rcs: Vec<std::path::PathBuf> = vec![
-        home.join(".zshrc"),
-        home.join(".bashrc"),
-    ];
-
-    for rc in &shell_rcs {
+    // bash/zsh profiles (create ~/.zshrc if neither exists)
+    for rc in &[home.join(".zshrc"), home.join(".bashrc")] {
         if rc.exists() || !installed_any {
-            write_shell_block(rc, BASH_ZSH_BLOCK, SHELL_MARKER_START, SHELL_MARKER_END)?;
-            eprintln!("  ✓ Shell integration added to {}", rc.display());
+            targets.push(ShellTarget {
+                path: rc.clone(),
+                marker_start: SHELL_MARKER_START,
+                marker_end: SHELL_MARKER_END,
+                block: BASH_ZSH_BLOCK,
+            });
             installed_any = true;
         }
     }
 
-    // PowerShell profile
+    // PowerShell profile (when pwsh is available)
     if let Some(ps_profile) = get_powershell_profile() {
-        // Ensure parent dir exists
-        if let Some(parent) = ps_profile.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        write_shell_block(&ps_profile, POWERSHELL_BLOCK, PS_MARKER_START, PS_MARKER_END)?;
-        eprintln!("  ✓ PowerShell integration added to {}", ps_profile.display());
+        targets.push(ShellTarget {
+            path: ps_profile,
+            marker_start: PS_MARKER_START,
+            marker_end: PS_MARKER_END,
+            block: POWERSHELL_BLOCK,
+        });
     }
 
-    Ok(())
+    targets
+}
+
+fn confirm_shell_integration(
+    targets: &[ShellTarget],
+    mirage_home: &std::path::Path,
+    assume_yes: bool,
+) -> Result<InstallDecision, Box<dyn std::error::Error + Send + Sync>> {
+    let backup_dir = mirage_home.join("backups");
+
+    eprintln!("  This install will:");
+    eprintln!("    1) Install a background service for auto-start");
+    eprintln!("    2) Add a managed shell block to enable mirage by default");
+    eprintln!("  Managed block markers:");
+    eprintln!("    {}", SHELL_MARKER_START);
+    eprintln!("    {}", SHELL_MARKER_END);
+    eprintln!("  Files that may be modified:");
+    for target in targets {
+        eprintln!("    {}", target.path.display());
+    }
+    eprintln!(
+        "  Backups for changed files are written to: {}",
+        backup_dir.display()
+    );
+    eprintln!("  Revert options: `mirage-proxy --service-uninstall` or restore a backup file.");
+
+    if assume_yes {
+        return Ok(InstallDecision::Proceed);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        eprintln!("  Non-interactive shell detected. Proceeding without prompt (pass `--yes` to silence).");
+        return Ok(InstallDecision::Proceed);
+    }
+
+    eprint!("  Continue with install? [y/N]: ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer == "y" || answer == "yes" {
+        return Ok(InstallDecision::Proceed);
+    }
+
+    eprint!("  Run in dry-run mode instead? [y/N]: ");
+    std::io::stderr().flush()?;
+    answer.clear();
+    std::io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer == "y" || answer == "yes" {
+        return Ok(InstallDecision::ProceedDryRun);
+    }
+
+    Ok(InstallDecision::Cancel)
+}
+
+fn install_shell(
+    port: u16,
+    mirage_home: &std::path::Path,
+    targets: &[ShellTarget],
+) -> Result<Vec<ShellWriteResult>, Box<dyn std::error::Error + Send + Sync>> {
+    let _ = port; // port is baked into the shell block constants (8686)
+    let backup_dir = mirage_home.join("backups");
+    let mut results = Vec::new();
+
+    for target in targets {
+        let result = write_shell_block(
+            &target.path,
+            target.block,
+            target.marker_start,
+            target.marker_end,
+            &backup_dir,
+        )?;
+        if result.changed {
+            eprintln!("  ✓ Shell integration updated in {}", result.path.display());
+            if let Some(ref backup) = result.backup_path {
+                eprintln!("    backup: {}", backup.display());
+            }
+        } else {
+            eprintln!("  ✓ Shell integration already up-to-date in {}", result.path.display());
+        }
+        results.push(result);
+    }
+
+    Ok(results)
 }
 
 fn uninstall_shell() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1029,7 +1161,9 @@ fn write_shell_block(
     block: &str,
     marker_start: &str,
     marker_end: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    backup_dir: &std::path::Path,
+) -> Result<ShellWriteResult, Box<dyn std::error::Error + Send + Sync>> {
+    let existed_before = path.exists();
     let contents = std::fs::read_to_string(path).unwrap_or_default();
     let cleaned = remove_block(&contents, marker_start, marker_end);
 
@@ -1041,8 +1175,41 @@ fn write_shell_block(
         marker_end,
     );
 
-    std::fs::write(path, new_contents)?;
-    Ok(())
+    let changed = contents != new_contents;
+    let mut backup_path = None;
+
+    if changed {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if existed_before {
+            backup_path = Some(backup_file(path, backup_dir)?);
+        }
+        std::fs::write(path, new_contents)?;
+    }
+
+    Ok(ShellWriteResult {
+        path: path.to_path_buf(),
+        changed,
+        backup_path,
+    })
+}
+
+fn backup_file(
+    path: &std::path::Path,
+    backup_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    std::fs::create_dir_all(backup_dir)?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("profile");
+    let backup_path = backup_dir.join(format!("{}.{}.bak", name, ts));
+    std::fs::copy(path, &backup_path)?;
+    Ok(backup_path)
 }
 
 fn remove_block(contents: &str, marker_start: &str, marker_end: &str) -> String {
