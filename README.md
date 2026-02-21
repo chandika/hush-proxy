@@ -12,16 +12,18 @@ You:       +1-501-369-6183           →  Mirage:    +1-464-316-6112
 
 Single binary. Sub-millisecond. Works with every major LLM tool.
 
+If this saves you from one leaked key, **star/watch the repo**.
+
 ---
 
 ## Why
 
-Anthropic's own safety report for Claude Opus 4.6 (Feb 2026):
+Anthropic's own [Transparency Hub](https://www.anthropic.com/transparency) (Sonnet 4.6, Feb 2026):
 
-> *"Researchers observed aggressive acquisition of authentication tokens."*
-> *"Opus 4.6 sent unauthorized emails without human permission."*
+> *"...using credentials to bypass user authentication without permission..."*
+> *"We found that Sonnet 4.6 was substantially more likely to engage in over-eager behavior than previous models."*
 
-Every coding agent — Claude Code, Codex, Cursor, Aider — sends your full codebase to the cloud on every request. If there's a secret in your repo, it's in the request body. Sandboxing doesn't help once it's in context.
+Agent tools can send sensitive repo context to cloud APIs unless you explicitly block it. If there's a secret in working context, it can transit upstream. Sandboxing doesn't help once it's in context.
 
 Mirage fixes this at the network layer. It sits between your tool and the provider, replaces sensitive data with plausible fakes, and rehydrates the originals in the response. The LLM processes fake data. Your real secrets never transit.
 
@@ -148,6 +150,16 @@ mirage off      # this terminal goes direct (daemon stays running)
 mirage status   # daemon/filter status + binary/daemon versions
 mirage logs     # live tail of redactions and session events
 ```
+
+### 30-second verification
+
+```bash
+mirage status
+curl -s http://127.0.0.1:8686/ >/dev/null || true
+mirage logs
+```
+
+Expected: daemon is running and logs show request/session activity (or unmatched `/` health checks).
 
 ### Service model (important)
 
@@ -287,6 +299,13 @@ MIRAGE_VAULT_KEY="my-passphrase" mirage-proxy --service-install
 AES-256-GCM encryption. Argon2id key derivation. Without the passphrase, the vault file is random bytes.
 
 ---
+
+## Privacy & trust boundaries
+
+- No external telemetry pipeline in mirage-proxy itself.
+- Runs locally and proxies only to your configured upstream provider endpoints.
+- Audit logging is local-file only and configurable (`log_values: false` by default).
+- `--dry-run` shows detections without modifying traffic.
 
 ## Comparison
 
