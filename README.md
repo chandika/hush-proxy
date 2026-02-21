@@ -155,7 +155,7 @@ mirage logs     # live tail of redactions and session events
 
 ```bash
 mirage status
-curl -s http://127.0.0.1:8686/ >/dev/null || true
+curl -s http://127.0.0.1:8686/healthz
 mirage logs
 ```
 

@@ -79,6 +79,23 @@ fn error_response(status: StatusCode, msg: &str) -> Response<BoxBody> {
         .unwrap()
 }
 
+fn health_response(state: &ProxyState) -> Response<BoxBody> {
+    use std::sync::atomic::Ordering;
+
+    let body = serde_json::json!({
+        "status": "ok",
+        "service": "mirage-proxy",
+        "requests": state.stats.requests.load(Ordering::Relaxed),
+        "redactions": state.stats.redactions.load(Ordering::Relaxed),
+        "sessions": state.stats.sessions.load(Ordering::Relaxed),
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(full_body(Bytes::from(body.to_string())))
+        .unwrap()
+}
+
 /// Fast-path: forward request without inspection (when decompression fails)
 async fn forward_request(
     method: hyper::Method,
@@ -151,6 +168,10 @@ pub async fn handle_request(
     let method = req.method().clone();
     let path = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
     let headers = req.headers().clone();
+
+    if path == "/healthz" {
+        return Ok(health_response(&state));
+    }
 
     debug!("{} {}", method, path);
     for (name, value) in req.headers().iter() {
