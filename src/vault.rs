@@ -58,6 +58,7 @@ impl Vault {
     /// `key` must be exactly 32 bytes (256-bit). Derived from passphrase via Argon2id.
     /// If loading fails with the primary key, attempts legacy SHA-256 derivation
     /// for backward compatibility, then re-encrypts with the new key.
+    #[cfg(test)]
     pub fn new(path: PathBuf, key: &[u8; KEY_LEN], flush_threshold: usize) -> Self {
         Self::new_with_legacy(path, key, None, flush_threshold)
     }
@@ -183,6 +184,7 @@ impl Vault {
     }
 
     /// Store a mapping (original -> fake) — legacy global scope
+    #[cfg(test)]
     pub fn put(&self, original: &str, fake: &str, kind: &str) {
         let mut inner = self.inner.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -219,12 +221,14 @@ impl Vault {
     }
 
     /// Look up original for a fake value (for rehydration)
+    #[cfg(test)]
     pub fn get_original(&self, fake: &str) -> Option<String> {
         let inner = self.inner.lock().unwrap();
         inner.reverse.get(fake).map(|(_, original)| original.clone())
     }
 
     /// Get all reverse mappings for rehydration
+    #[cfg(test)]
     pub fn reverse_map(&self) -> Vec<(String, String)> {
         let inner = self.inner.lock().unwrap();
         let mut pairs: Vec<_> = inner.reverse.iter()
@@ -235,6 +239,7 @@ impl Vault {
     }
 
     /// Flush: persist current state to disk and clear old entries
+    #[cfg(test)]
     pub fn flush(&self) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap();
         self.persist_inner(&inner)?;
@@ -243,6 +248,7 @@ impl Vault {
     }
 
     /// Flush and clear all mappings (periodic reset)
+    #[cfg(test)]
     pub fn flush_and_clear(&self) -> Result<usize, String> {
         let mut inner = self.inner.lock().unwrap();
         let count = inner.forward.len();
@@ -255,6 +261,7 @@ impl Vault {
     }
 
     /// Flush entries older than `max_age` seconds
+    #[cfg(test)]
     pub fn flush_stale(&self, max_age_secs: i64) -> Result<usize, String> {
         let mut inner = self.inner.lock().unwrap();
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs);
@@ -281,6 +288,7 @@ impl Vault {
     }
 
     /// Stats
+    #[cfg(test)]
     pub fn stats(&self) -> VaultStats {
         let inner = self.inner.lock().unwrap();
         VaultStats {
@@ -331,6 +339,7 @@ impl Vault {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 pub struct VaultStats {
     pub total_mappings: usize,
     pub ops_since_flush: usize,

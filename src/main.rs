@@ -191,7 +191,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let stats = Stats::new();
 
     let state = Arc::new(ProxyState {
-        target_url: String::new(), // always multi-provider
         client: Client::new(),
         sessions: SessionManager::new(vault.clone()),
         config: cfg.clone(),

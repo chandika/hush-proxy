@@ -16,7 +16,6 @@ use crate::faker::Faker;
 use crate::redactor::detect;
 use crate::session::SessionManager;
 use crate::stats::Stats;
-use crate::vault::Vault;
 
 /// Decompress a body based on content-encoding
 fn decompress_body(data: &[u8], encoding: &str) -> Result<Vec<u8>, String> {
@@ -54,7 +53,6 @@ fn compress_body(data: &[u8], encoding: &str) -> Result<Vec<u8>, String> {
 }
 
 pub struct ProxyState {
-    pub target_url: String,
     pub client: Client,
     pub sessions: SessionManager,
     pub config: Config,
@@ -743,26 +741,6 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
                     continue; // Never redact auth/config fields
                 }
                 redact_json_value(v, state, faker);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Recursively rehydrate PII fakes in JSON values
-fn rehydrate_json_value(value: &mut Value, faker: &Faker) {
-    match value {
-        Value::String(s) => {
-            *s = faker.rehydrate(s);
-        }
-        Value::Array(arr) => {
-            for item in arr {
-                rehydrate_json_value(item, faker);
-            }
-        }
-        Value::Object(obj) => {
-            for (_, v) in obj.iter_mut() {
-                rehydrate_json_value(v, faker);
             }
         }
         _ => {}

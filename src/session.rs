@@ -58,6 +58,7 @@ impl SessionManager {
     }
 
     /// Clean up sessions that haven't been used recently
+    #[allow(dead_code)]
     pub fn cleanup_stale(&self, max_sessions: usize) {
         let mut sessions = self.sessions.lock().unwrap();
         if sessions.len() > max_sessions {

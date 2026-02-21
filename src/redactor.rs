@@ -1,7 +1,9 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use uuid::Uuid;
 
 /// A detected PII entity
@@ -110,12 +112,14 @@ static HIGH_ENTROPY_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[a-zA-Z0-9+/=_-]{32,}").unwrap());
 
 /// Session-scoped token map for consistent redaction and rehydration
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct TokenMap {
     // original -> (label, index)
     inner: Arc<Mutex<TokenMapInner>>,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct TokenMapInner {
     forward: HashMap<String, String>,  // original -> token
@@ -123,6 +127,7 @@ struct TokenMapInner {
     counters: HashMap<String, usize>,  // kind_label -> next index
 }
 
+#[cfg(test)]
 impl TokenMap {
     pub fn new() -> Self {
         Self {

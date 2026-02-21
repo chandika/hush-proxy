@@ -3,8 +3,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_target")]
-    pub target: String,
     #[serde(default = "default_bind")]
     pub bind: String,
     #[serde(default = "default_port")]
@@ -104,9 +102,6 @@ impl Default for AuditConfig {
     }
 }
 
-fn default_target() -> String {
-    String::new()
-}
 fn default_bind() -> String {
     "127.0.0.1".to_string()
 }
@@ -179,7 +174,6 @@ impl Config {
 
         tracing::info!("No config file found, using defaults");
         Config {
-            target: default_target(),
             bind: default_bind(),
             port: default_port(),
             sensitivity: default_sensitivity(),
