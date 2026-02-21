@@ -1036,8 +1036,8 @@ fn confirm_shell_integration(
     std::io::stderr().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
-    let answer = answer.trim().to_ascii_lowercase();
-    if answer == "y" || answer == "yes" {
+    let first = answer.trim().to_ascii_lowercase();
+    if first == "y" || first == "yes" {
         return Ok(InstallDecision::Proceed);
     }
 
