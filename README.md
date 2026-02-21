@@ -2,6 +2,8 @@
 
 **Your LLM agent sees fake API keys. Your real ones never leave your machine.**
 
+<video src="assets/mirage-proxy.mp4" controls muted loop playsinline width="100%"></video>
+
 ```
 You:       AKIAQX4BIPW3AHOV29GN     →  Mirage:    AKIADKRY5CJQX4BIPW3A
 You:       lee.taylor56789@aol.com   →  Mirage:    chris.hall456@gmail.com
