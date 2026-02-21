@@ -50,10 +50,58 @@ impl FakerMaps {
         let mut pairs: Vec<_> = self.reverse.iter().collect();
         pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
         for (fake, original) in pairs {
-            result = result.replace(fake, original);
+            if !should_allow_rehydrate_mapping(fake) {
+                continue;
+            }
+
+            // For simple token-like strings, only replace at token boundaries.
+            // This prevents accidental mid-word rewrites (e.g. "pattern" -> "p<secret>tern").
+            if fake.chars().all(is_token_char) {
+                result = replace_token_bounded(&result, fake, original);
+            } else {
+                result = result.replace(fake, original);
+            }
         }
         result
     }
+
+}
+
+fn should_allow_rehydrate_mapping(fake: &str) -> bool {
+    // Never rehydrate empty/tiny mappings; these are too collision-prone.
+    // Real secrets/fakes are substantially longer.
+    fake.len() >= 6
+}
+
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'
+}
+
+fn replace_token_bounded(input: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() || input.is_empty() || !input.contains(needle) {
+        return input.to_string();
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut last = 0usize;
+
+    for (start, _) in input.match_indices(needle) {
+        let end = start + needle.len();
+
+        let prev = input[..start].chars().next_back();
+        let next = input[end..].chars().next();
+        let left_ok = prev.map(|c| !is_token_char(c)).unwrap_or(true);
+        let right_ok = next.map(|c| !is_token_char(c)).unwrap_or(true);
+
+        if left_ok && right_ok {
+            out.push_str(&input[last..start]);
+            out.push_str(replacement);
+            last = end;
+        }
+    }
+
+    out.push_str(&input[last..]);
+    out
 }
 
 static FAKE_DOMAINS: &[&str] = &[
@@ -378,7 +426,7 @@ fn add_connection_component_mappings(maps: &mut FakerMaps, original: &str, fake:
 
     for (f, o) in pairs {
         if let (Some(fake_comp), Some(orig_comp)) = (f, o) {
-            if !fake_comp.is_empty() && fake_comp != orig_comp {
+            if fake_comp.len() >= 6 && fake_comp != orig_comp {
                 maps.reverse.entry(fake_comp).or_insert(orig_comp);
             }
         }
@@ -533,4 +581,21 @@ mod tests {
         assert!(rehydrated.contains("db.prod.internal"));
         assert!(rehydrated.contains("app_prod"));
     }
+
+    #[test]
+    fn test_rehydrate_does_not_replace_inside_identifiers() {
+        let mut maps = FakerMaps::new();
+        maps.reverse.insert("at".to_string(), "pscale_api_real".to_string());
+        maps.reverse.insert("pscale_api_fake.abc123".to_string(), "pscale_api_real.abc123".to_string());
+
+        let input = "pattern file_path pscale_api_fake.abc123";
+        let out = maps.rehydrate(input);
+
+        // short/tiny mappings are ignored completely
+        assert!(out.contains("pattern"));
+        assert!(out.contains("file_path"));
+        // real fake key still rehydrates
+        assert!(out.contains("pscale_api_real.abc123"));
+    }
+
 }
