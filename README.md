@@ -1,6 +1,6 @@
 # mirage-proxy
 
-**Your LLM agent sees fake API keys. Your real ones never leave your machine.**
+**Your LLM agent sees fake secrets & keys. Your real ones never leave your machine.**
 
 ![Mirage Proxy demo](assets/mirage-proxy-preview.gif)
 
