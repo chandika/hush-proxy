@@ -27,21 +27,77 @@ Mirage fixes this at the network layer. It sits between your tool and the provid
 
 ---
 
-## Install
+## Install (source-first)
+
+If you do not trust prebuilt binaries from an unfamiliar maintainer, use source build.
+
+### Option 1 (recommended): Build from source
+
+```bash
+cargo install --locked --git https://github.com/chandika/mirage-proxy
+mirage-proxy --service-install
+```
+
+Requires Rust 1.75+.
+
+### Option 2: Homebrew / Scoop (convenience)
 
 ```bash
 brew install chandika/tap/mirage-proxy    # macOS / Linux
-mirage-proxy --service-install            # installs daemon + shell integration
+mirage-proxy --service-install
 ```
 
-Before writing to shell profiles, install now:
-- shows exactly which files it may change (`~/.zshrc`, `~/.bashrc`, PowerShell profile)
-- asks for confirmation in interactive terminals
-- if you decline, it offers a `dry-run` install instead
-- wraps changes inside managed markers:
-  - `# >>> mirage-proxy >>>`
-  - `# <<< mirage-proxy <<<`
-- creates timestamped backups in `~/.mirage/backups/` for changed files
+Windows:
+
+```bash
+scoop bucket add chandika https://github.com/chandika/scoop-bucket
+scoop install mirage-proxy
+mirage-proxy --service-install
+```
+
+### Trust & verification
+
+- Source-first: default to `cargo install --locked --git ...` if you do not know the maintainer.
+- Install scope: `--service-install` only adds one marked shell block, installs a user-level daemon, and writes backups for changed shell files.
+- Rollback: `mirage-proxy --service-uninstall` removes daemon + marked shell block.
+- Optional confidence check: run `mirage-proxy --service-install --dry-run` first.
+
+### What it writes to your shell config
+
+`mirage-proxy --service-install` adds one managed block to each target shell file.
+On bash/zsh, that block:
+- exports provider base URL env vars to `http://127.0.0.1:8686/...`
+- defines a `mirage` shell function (`on`, `off`, `status`, `logs`)
+- shows a startup status line when the daemon is reachable
+
+It does not rewrite unrelated parts of your `.zshrc`/`.bashrc`.
+On reinstall, Mirage removes only its previous marked block and rewrites that block.
+
+Example (bash/zsh block shape):
+
+```bash
+# >>> mirage-proxy >>>
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8686/anthropic"
+export OPENAI_BASE_URL="http://127.0.0.1:8686"
+# ...other provider base URLs...
+mirage() {
+  # on | off | status | logs
+}
+# <<< mirage-proxy <<<
+```
+
+### Why this is safe and easy to undo
+
+- Managed scope only: edits are limited to lines between `# >>> mirage-proxy >>>` and `# <<< mirage-proxy <<<`
+- Backup-first for existing files: each changed profile gets a timestamped backup in `~/.mirage/backups/`
+- Reversible in one command: `mirage-proxy --service-uninstall` removes daemon + Mirage shell blocks
+- Reversible manually: delete only the marked block (or restore a backup file)
+
+### Turn it off
+
+- For current shell only: `mirage off`
+- Turn it back on in current shell: `mirage on`
+- Fully remove auto-start + shell integration: `mirage-proxy --service-uninstall`
 
 For automation/non-interactive installs:
 
@@ -54,31 +110,6 @@ Done. Mirage runs as a background service and is ON by default for new terminals
 ```
 🛡️ mirage active (vX.Y.Z)
 ```
-
-<details>
-<summary><b>Windows</b></summary>
-
-```bash
-scoop bucket add chandika https://github.com/chandika/scoop-bucket
-scoop install mirage-proxy
-mirage-proxy --service-install
-```
-
-Works with PowerShell and WSL. Task Scheduler keeps it running.
-
-</details>
-
-<details>
-<summary><b>Build from source</b></summary>
-
-```bash
-cargo install --git https://github.com/chandika/mirage-proxy
-mirage-proxy --service-install
-```
-
-Requires Rust 1.75+.
-
-</details>
 
 <details>
 <summary><b>OpenClaw</b></summary>
@@ -121,6 +152,10 @@ mirage logs     # live tail of redactions and session events
 ### Service model (important)
 
 - `mirage-proxy --service-install` installs a daemon (launchd/systemd/Task Scheduler)
+- Daemon files are standard user-level service files:
+  - macOS: `~/Library/LaunchAgents/com.mirage-proxy.plist`
+  - Linux: `~/.config/systemd/user/mirage-proxy.service`
+  - Windows: Task Scheduler job `mirage-proxy`
 - Shell integration exports provider base URLs in new terminals
 - Shell edits are scoped to a marked block and are reversible
 - `mirage on/off` only toggles env vars for the current shell
@@ -339,6 +374,7 @@ mirage-proxy [OPTIONS]
 - [x] macOS (launchd), Linux (systemd), Windows (Task Scheduler + PowerShell)
 - [x] Native OpenClaw integration (ClawdHub skill)
 - [x] Provider bypass list
+- [ ] Signed release artifacts + provenance attestation
 - [ ] Custom pattern definitions in config
 - [ ] Optional ONNX NER for name/organization detection
 - [ ] Route mode (sensitive requests → local model)
