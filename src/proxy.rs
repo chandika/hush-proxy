@@ -201,6 +201,23 @@ pub async fn handle_request(
 
     state.stats.add_request(body_bytes.len() as u64);
 
+    let request_content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    // Never inspect binary request payloads (multipart, images, PDFs, etc).
+    // Forward as-is to avoid corruption.
+    if !body_bytes.is_empty() && !request_content_type.is_empty() && !is_textual_content_type(&request_content_type) {
+        debug!(
+            "body is non-text content-type ({}), forwarding without inspection",
+            request_content_type
+        );
+        let (_, faker) = state.sessions.get_faker("default");
+        return forward_request(method, &path, &headers, body_bytes.to_vec(), state, faker).await;
+    }
+
     // Check if this provider is bypassed (no redaction/rehydration)
     let is_chatgpt_early = headers.contains_key("chatgpt-account-id");
     let resolved_upstream = crate::providers::resolve_provider(&path, is_chatgpt_early)
@@ -393,11 +410,100 @@ fn header_content_encoding(headers: &reqwest::header::HeaderMap) -> String {
         .to_ascii_lowercase()
 }
 
+fn header_content_type(headers: &reqwest::header::HeaderMap) -> String {
+    headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn is_textual_content_type(content_type: &str) -> bool {
+    let ct = content_type.split(';').next().unwrap_or("").trim();
+    ct.starts_with("text/")
+        || ct == "application/json"
+        || ct.ends_with("+json")
+        || ct == "application/xml"
+        || ct.ends_with("+xml")
+        || ct == "application/javascript"
+        || ct == "application/x-www-form-urlencoded"
+        || ct == "application/graphql"
+        || ct == "application/x-ndjson"
+        || ct == "application/json-seq"
+        || ct == "text/event-stream"
+}
+
+fn should_skip_redaction_for_payload(text: &str) -> bool {
+    let s = text.trim();
+
+    // Non-text data URLs (image/pdf/audio/etc.) should remain byte-for-byte intact.
+    // Example: data:application/pdf;base64,JVBERi0xLjcK...
+    if let Some(rest) = s.strip_prefix("data:") {
+        if let Some((meta, _payload)) = rest.split_once(',') {
+            let has_base64 = meta.split(';').any(|p| p.eq_ignore_ascii_case("base64"));
+            if has_base64 {
+                let mime = meta.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                let is_text_data = mime.starts_with("text/")
+                    || mime == "application/json"
+                    || mime.ends_with("+json")
+                    || mime == "application/xml"
+                    || mime.ends_with("+xml")
+                    || mime == "application/javascript";
+                if !is_text_data {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Large standalone base64 blobs are usually binary payloads.
+    // Avoid mutating them to prevent corruption.
+    if s.len() >= 512 {
+        let cleaned_len = s
+            .bytes()
+            .filter(|b| !matches!(*b, b'\r' | b'\n' | b'\t' | b' '))
+            .count();
+        if cleaned_len >= 512
+            && s.bytes().all(|b| {
+                matches!(b,
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+                    b'+' | b'/' | b'=' | b'\r' | b'\n' | b'\t' | b' '
+                )
+            })
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn has_anthropic_thinking_signature(text: &str) -> bool {
     // Anthropic extended thinking blocks are signed.
     // Any mutation inside those blocks invalidates the signature.
     (text.contains("\"type\":\"thinking\"") || text.contains("\"type\": \"thinking\""))
         && (text.contains("\"signature\":\"") || text.contains("\"signature\": \""))
+}
+
+fn passthrough_response(
+    status: reqwest::StatusCode,
+    resp_headers: reqwest::header::HeaderMap,
+    body: Vec<u8>,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    let mut builder = Response::builder().status(StatusCode::from_u16(status.as_u16()).unwrap());
+    for (name, value) in resp_headers.iter() {
+        let name_str = name.as_str().to_lowercase();
+        if name_str == "content-length" || name_str == "transfer-encoding" {
+            continue;
+        }
+        if let Ok(n) = hyper::header::HeaderName::from_bytes(name.as_ref()) {
+            if let Ok(v) = hyper::header::HeaderValue::from_bytes(value.as_bytes()) {
+                builder = builder.header(n, v);
+            }
+        }
+    }
+
+    Ok(builder.body(full_body(Bytes::from(body))).unwrap())
 }
 
 async fn handle_regular_response(
@@ -422,6 +528,12 @@ async fn handle_regular_response(
     // Safety guards:
     // - Never mutate signed thinking payloads (signature would break)
     // - For compressed responses: decompress -> rehydrate -> recompress
+    let response_content_type = header_content_type(&resp_headers);
+    if !response_content_type.is_empty() && !is_textual_content_type(&response_content_type) {
+        debug!("response is non-text content-type ({}), skipping rehydration", response_content_type);
+        return passthrough_response(status, resp_headers, body_bytes.to_vec());
+    }
+
     let content_encoding = header_content_encoding(&resp_headers);
     let is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
 
@@ -596,6 +708,10 @@ async fn handle_streaming_response(
 /// Smart redaction: uses config to decide action per PII kind.
 /// Only counts and logs *new* detections — values already seen in this session are silently handled.
 fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
+    if should_skip_redaction_for_payload(text) {
+        return text.to_string();
+    }
+
     let entities = detect(text);
     let mut result = text.to_string();
     let mut new_redaction_count: u64 = 0;
@@ -765,5 +881,36 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_textual_content_type, should_skip_redaction_for_payload};
+
+    #[test]
+    fn non_text_data_url_is_skipped() {
+        let pdf_data_url = "data:application/pdf;base64,JVBERi0xLjcK";
+        assert!(should_skip_redaction_for_payload(pdf_data_url));
+    }
+
+    #[test]
+    fn text_data_url_is_not_skipped() {
+        let text_data_url = "data:text/plain;base64,SGVsbG8=";
+        assert!(!should_skip_redaction_for_payload(text_data_url));
+    }
+
+    #[test]
+    fn large_base64_blob_is_skipped() {
+        let blob = "A".repeat(700);
+        assert!(should_skip_redaction_for_payload(&blob));
+    }
+
+    #[test]
+    fn content_type_text_detection_works() {
+        assert!(is_textual_content_type("application/json; charset=utf-8"));
+        assert!(is_textual_content_type("text/plain"));
+        assert!(!is_textual_content_type("application/pdf"));
+        assert!(!is_textual_content_type("image/png"));
     }
 }
