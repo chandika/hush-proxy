@@ -1,12 +1,18 @@
 [package]
 name = "mirage-proxy"
-version = "0.7.8"
+version = "0.7.9"
 edition = "2021"
 description = "Invisible sensitive data filter for LLM APIs — secrets, credentials, and PII replaced with plausible fakes"
 license = "MIT"
 repository = "https://github.com/chandika/mirage-proxy"
 keywords = ["security", "privacy", "llm", "proxy", "secrets"]
 categories = ["command-line-utilities", "web-programming"]
+exclude = [
+  "assets/*",
+  "target/*",
+  "docs/*",
+  "release-workflow.yml"
+]
 
 [dependencies]
 zstd = "0.13"
