@@ -98,6 +98,14 @@ struct Args {
     /// Show service and filter status
     #[arg(long)]
     service_status: bool,
+
+    /// Install wrapper launchers (wrapper-first; no shell profile mutation)
+    #[arg(long)]
+    wrapper_install: bool,
+
+    /// Uninstall wrapper launchers
+    #[arg(long)]
+    wrapper_uninstall: bool,
 }
 
 #[tokio::main]
@@ -130,6 +138,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
+    if args.wrapper_install {
+        return wrapper_install(args.port.unwrap_or(8686));
+    }
+    if args.wrapper_uninstall {
+        return wrapper_uninstall();
+    }
     if args.service_install {
         return service_install(&args);
     }
@@ -300,6 +314,228 @@ fn mirage_dir() -> std::path::PathBuf {
     dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".mirage")
+}
+
+// ─── Wrapper-first design ─────────────────────────────────────────────
+// Instead of mutating shell profiles globally, create small per-tool
+// wrapper scripts in ~/.mirage/bin/ that set only the needed env vars
+// and exec the real binary. Users prepend ~/.mirage/bin to PATH.
+
+struct WrapperTool {
+    name: &'static str,
+    env_vars: &'static [(&'static str, &'static str)], // (VAR, path suffix)
+}
+
+const WRAPPER_TOOLS: &[WrapperTool] = &[
+    WrapperTool {
+        name: "claude",
+        env_vars: &[("ANTHROPIC_BASE_URL", "/anthropic")],
+    },
+    WrapperTool {
+        name: "codex",
+        env_vars: &[("OPENAI_BASE_URL", "")],
+    },
+    WrapperTool {
+        name: "cursor",
+        env_vars: &[("OPENAI_BASE_URL", "")],
+    },
+    WrapperTool {
+        name: "aider",
+        env_vars: &[
+            ("ANTHROPIC_BASE_URL", "/anthropic"),
+            ("OPENAI_BASE_URL", ""),
+        ],
+    },
+    WrapperTool {
+        name: "opencode",
+        env_vars: &[("OPENAI_BASE_URL", "")],
+    },
+];
+
+fn wrapper_install(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let bin_dir = mirage_dir().join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+
+    eprintln!();
+    eprintln!("  \x1b[1mmirage-proxy\x1b[0m — installing wrappers");
+    eprintln!("  ─────────────────────────────────────");
+
+    let mut installed = Vec::new();
+
+    for tool in WRAPPER_TOOLS {
+        let wrapper_path = if cfg!(windows) {
+            bin_dir.join(format!("{}.cmd", tool.name))
+        } else {
+            bin_dir.join(tool.name)
+        };
+
+        let script = if cfg!(windows) {
+            generate_windows_wrapper(tool, port)
+        } else {
+            generate_unix_wrapper(tool, port)
+        };
+
+        std::fs::write(&wrapper_path, &script)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&wrapper_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&wrapper_path, perms)?;
+        }
+
+        installed.push(tool.name);
+        eprintln!("  ✓ {}", wrapper_path.display());
+    }
+
+    eprintln!();
+    eprintln!("  Installed wrappers: {}", installed.join(", "));
+    eprintln!();
+    eprintln!("  Add to your PATH (once):");
+    if cfg!(windows) {
+        eprintln!(
+            "    $env:PATH = \"{}\" + \";\" + $env:PATH",
+            bin_dir.display()
+        );
+        eprintln!("    # Or add permanently via System > Environment Variables");
+    } else {
+        eprintln!(
+            "    export PATH=\"{}:$PATH\"",
+            bin_dir.display()
+        );
+        eprintln!("    # Add that line to ~/.zshrc or ~/.bashrc to persist");
+    }
+    eprintln!();
+    eprintln!("  How it works:");
+    eprintln!("    $ claude          # ← uses wrapper, traffic goes through mirage");
+    eprintln!("    $ /usr/local/bin/claude  # ← direct, no mirage (original binary)");
+    eprintln!();
+    eprintln!("  No global env vars are set. Other tools are unaffected.");
+    eprintln!("  The daemon must be running: mirage-proxy --service-install (or start manually).");
+    eprintln!();
+
+    Ok(())
+}
+
+fn wrapper_uninstall() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let bin_dir = mirage_dir().join("bin");
+
+    eprintln!();
+    eprintln!("  Removing wrappers...");
+
+    if !bin_dir.exists() {
+        eprintln!("  ⚠ No wrapper directory found at {}", bin_dir.display());
+        return Ok(());
+    }
+
+    for tool in WRAPPER_TOOLS {
+        let wrapper_path = if cfg!(windows) {
+            bin_dir.join(format!("{}.cmd", tool.name))
+        } else {
+            bin_dir.join(tool.name)
+        };
+        if wrapper_path.exists() {
+            std::fs::remove_file(&wrapper_path)?;
+            eprintln!("  ✓ Removed {}", wrapper_path.display());
+        }
+    }
+
+    // Remove bin dir if empty
+    if bin_dir.exists() {
+        if std::fs::read_dir(&bin_dir)?.next().is_none() {
+            std::fs::remove_dir(&bin_dir)?;
+            eprintln!("  ✓ Removed empty {}", bin_dir.display());
+        }
+    }
+
+    eprintln!();
+    eprintln!("  Remove the PATH entry from your shell config if you added one.");
+    eprintln!();
+
+    Ok(())
+}
+
+fn generate_unix_wrapper(tool: &WrapperTool, port: u16) -> String {
+    let mut script = format!(
+        r#"#!/bin/sh
+# mirage-proxy wrapper for {name} — routes LLM traffic through mirage
+# Generated by: mirage-proxy --wrapper-install
+# Remove with:  mirage-proxy --wrapper-uninstall
+set -e
+MIRAGE_PORT="${{MIRAGE_PORT:-{port}}}"
+"#,
+        name = tool.name,
+        port = port,
+    );
+
+    for (var, suffix) in tool.env_vars {
+        script.push_str(&format!(
+            "export {var}=\"http://127.0.0.1:${{MIRAGE_PORT}}{suffix}\"\n",
+            var = var,
+            suffix = suffix,
+        ));
+    }
+
+    // Find real binary by searching PATH, skipping our wrapper dir
+    script.push_str(&format!(
+        r#"
+# Find the real '{name}' binary, skipping this wrapper's directory
+WRAPPER_DIR="$(cd "$(dirname "$0")" && pwd)"
+REAL=""
+OLDIFS="$IFS"
+IFS=:
+for dir in $PATH; do
+  [ "$dir" = "$WRAPPER_DIR" ] && continue
+  [ -x "$dir/{name}" ] && REAL="$dir/{name}" && break
+done
+IFS="$OLDIFS"
+
+if [ -z "$REAL" ]; then
+  echo "mirage-proxy: could not find real '{name}' in PATH (looked everywhere except $WRAPPER_DIR)" >&2
+  exit 127
+fi
+
+exec "$REAL" "$@"
+"#,
+        name = tool.name,
+    ));
+
+    script
+}
+
+fn generate_windows_wrapper(tool: &WrapperTool, port: u16) -> String {
+    let mut script = format!(
+        "@echo off\r\nrem mirage-proxy wrapper for {name}\r\nrem Generated by: mirage-proxy --wrapper-install\r\n",
+        name = tool.name,
+    );
+
+    for (var, suffix) in tool.env_vars {
+        script.push_str(&format!(
+            "set {var}=http://127.0.0.1:{port}{suffix}\r\n",
+            var = var,
+            port = port,
+            suffix = suffix,
+        ));
+    }
+
+    // On Windows, .cmd wrappers in PATH take priority over .exe in later PATH entries.
+    // We use `where` to find the real binary, skipping our wrapper.
+    script.push_str(&format!(
+        r#"rem Find real {name} binary (skip this wrapper)
+for /f "tokens=*" %%i in ('where {name} 2^>nul') do (
+    echo %%i | findstr /i /c:".mirage\bin" >nul || (
+        %%i %*
+        exit /b %errorlevel%
+    )
+)
+echo mirage-proxy: could not find real '{name}' in PATH 1>&2
+exit /b 127
+"#,
+        name = tool.name,
+    ));
+
+    script
 }
 
 fn service_install(args: &Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

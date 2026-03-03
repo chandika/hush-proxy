@@ -29,83 +29,120 @@ Mirage fixes this at the network layer. It sits between your tool and the provid
 
 ---
 
-## Install (source-first)
+## Install
 
-If you do not trust prebuilt binaries from an unfamiliar maintainer, use source build.
+### Step 1: Get the binary
 
-### Option 1 (recommended): Build from source
+**From source (recommended if you don't know the maintainer):**
 
 ```bash
 cargo install --locked --git https://github.com/chandika/mirage-proxy
-mirage-proxy --service-install
 ```
 
 Requires Rust 1.75+.
 
-### Option 2: Homebrew / Scoop (convenience)
+**Homebrew / Scoop (convenience):**
 
 ```bash
 brew install chandika/tap/mirage-proxy    # macOS / Linux
-mirage-proxy --service-install
 ```
-
-Windows:
 
 ```bash
 scoop bucket add chandika https://github.com/chandika/scoop-bucket
-scoop install mirage-proxy
+scoop install mirage-proxy               # Windows
+```
+
+### Step 2: Start the daemon
+
+```bash
+mirage-proxy
+```
+
+That's it — daemon runs on `127.0.0.1:8686`. Keep it running however you like (launchd, systemd, background job, Docker sidecar).
+
+---
+
+## Usage: Wrapper-first (recommended)
+
+**The cleanest approach.** Installs small per-tool wrapper scripts in `~/.mirage/bin/`. Only the wrapped tool gets routed through mirage. Your global shell env is untouched. Other apps are unaffected.
+
+```bash
+mirage-proxy --wrapper-install
+```
+
+This writes wrapper scripts for: `claude`, `codex`, `cursor`, `aider`, `opencode`.
+
+Then add the wrapper bin dir to your PATH **once**:
+
+```bash
+# Add to ~/.zshrc or ~/.bashrc
+export PATH="$HOME/.mirage/bin:$PATH"
+```
+
+From then on:
+
+```bash
+claude          # ← miraged (traffic filtered)
+/usr/local/bin/claude  # ← direct, no mirage
+```
+
+**That's the whole model.** No global env mutation. No `mirage on/off`. Other tools remain direct.
+
+To uninstall wrappers:
+
+```bash
+mirage-proxy --wrapper-uninstall
+```
+
+### How the wrappers work
+
+Each wrapper is a small shell script (~10 lines) that:
+1. Sets only the env vars needed for that specific tool (e.g. `ANTHROPIC_BASE_URL` for `claude`)
+2. Searches `$PATH` for the real binary, skipping `~/.mirage/bin/` to avoid recursion
+3. Execs the real binary with all original arguments
+
+Nothing is injected globally. When you run `claude`, the env is set for that process only.
+
+---
+
+## Alternative: Global shell integration
+
+If you want mirage active for all LLM tools across every terminal without wrappers, use the service installer. This **does** modify your shell profile.
+
+```bash
 mirage-proxy --service-install
 ```
 
-### Trust & verification
+This:
+- Installs a background daemon (launchd/systemd/Task Scheduler)
+- Adds a managed block to `~/.zshrc` / `~/.bashrc` / PowerShell profile
+- Exports provider base URL env vars globally
 
-- Source-first: default to `cargo install --locked --git ...` if you do not know the maintainer.
-- Install scope: `--service-install` only adds one marked shell block, installs a user-level daemon, and writes backups for changed shell files.
-- Rollback: `mirage-proxy --service-uninstall` removes daemon + marked shell block.
-- Optional confidence check: run `mirage-proxy --service-install --dry-run` first.
+Toggle per-terminal with `mirage on` / `mirage off`.
 
 ### What it writes to your shell config
-
-`mirage-proxy --service-install` adds one managed block to each target shell file.
-On bash/zsh, that block:
-- exports provider base URL env vars to `http://127.0.0.1:8686/...`
-- defines a `mirage` shell function (`on`, `off`, `status`, `logs`)
-- shows a startup status line when the daemon is reachable
-
-It does not rewrite unrelated parts of your `.zshrc`/`.bashrc`.
-On reinstall, Mirage removes only its previous marked block and rewrites that block.
-
-Example (bash/zsh block shape):
 
 ```bash
 # >>> mirage-proxy >>>
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8686/anthropic"
 export OPENAI_BASE_URL="http://127.0.0.1:8686"
 # ...other provider base URLs...
-mirage() {
-  # on | off | status | logs
-}
+mirage() { # on | off | status | logs }
 # <<< mirage-proxy <<<
 ```
 
-### Why this is safe and easy to undo
+Reversible with `mirage-proxy --service-uninstall`.
 
-- Managed scope only: edits are limited to lines between `# >>> mirage-proxy >>>` and `# <<< mirage-proxy <<<`
-- Backup-first for existing files: each changed profile gets a timestamped backup in `~/.mirage/backups/`
-- Reversible in one command: `mirage-proxy --service-uninstall` removes daemon + Mirage shell blocks
-- Reversible manually: delete only the marked block (or restore a backup file)
+---
 
-### Turn it off
+## Wrapper vs. global shell — which to use?
 
-- For current shell only: `mirage off`
-- Turn it back on in current shell: `mirage on`
-- Fully remove auto-start + shell integration: `mirage-proxy --service-uninstall`
-
-For automation/non-interactive installs:
-
-```bash
-mirage-proxy --service-install --yes
-```
+| | Wrapper-first | Global shell |
+|---|---|---|
+| **Other apps affected** | ✗ No | ✓ Yes (all LLM tools) |
+| **Profile mutation** | ✗ None | ✓ Adds managed block |
+| **Per-tool control** | ✓ Explicit | Toggle with `mirage on/off` |
+| **Recommended for** | Most users | Power users / all-tools setup |
 
 Done. Mirage runs as a background service and is ON by default for new terminals.
 
