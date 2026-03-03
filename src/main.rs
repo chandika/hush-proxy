@@ -106,6 +106,14 @@ struct Args {
     /// Uninstall wrapper launchers
     #[arg(long)]
     wrapper_uninstall: bool,
+
+    /// Interactive setup: detect installed tools, select which to wrap
+    #[arg(long)]
+    setup: bool,
+
+    /// Uninstall everything: wrappers + daemon
+    #[arg(long)]
+    uninstall: bool,
 }
 
 #[tokio::main]
@@ -138,6 +146,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
+    if args.setup {
+        return setup_interactive(args.port.unwrap_or(8686), args.yes);
+    }
+    if args.uninstall {
+        return uninstall_all();
+    }
     if args.wrapper_install {
         return wrapper_install(args.port.unwrap_or(8686));
     }
@@ -351,6 +365,186 @@ const WRAPPER_TOOLS: &[WrapperTool] = &[
         env_vars: &[("OPENAI_BASE_URL", "")],
     },
 ];
+
+fn find_tool_in_path(name: &str, skip_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            if dir == skip_dir { continue; }
+            let candidate = dir.join(name);
+            if candidate.exists() { return Some(candidate); }
+            #[cfg(windows)] {
+                let exe = dir.join(format!("{}.exe", name));
+                if exe.exists() { return Some(exe); }
+            }
+        }
+    }
+    None
+}
+
+fn setup_interactive(port: u16, assume_yes: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::{IsTerminal, Write};
+    let bin_dir = mirage_dir().join("bin");
+
+    eprintln!();
+    eprintln!("  \x1b[1mmirage-proxy — setup\x1b[0m");
+    eprintln!("  ─────────────────────────────────────");
+    eprintln!("  Scanning for installed LLM tools...");
+    eprintln!();
+
+    let found: Vec<&WrapperTool> = WRAPPER_TOOLS.iter()
+        .filter(|t| find_tool_in_path(t.name, &bin_dir).is_some())
+        .collect();
+
+    if found.is_empty() {
+        eprintln!("  No supported tools found in PATH.");
+        eprintln!("  Supported: {}", WRAPPER_TOOLS.iter().map(|t| t.name).collect::<Vec<_>>().join(", "));
+        eprintln!();
+        return Ok(());
+    }
+
+    eprintln!("  Found:");
+    for (i, tool) in found.iter().enumerate() {
+        let real = find_tool_in_path(tool.name, &bin_dir).unwrap();
+        eprintln!("    [{}] {}  →  {}", i + 1, tool.name, real.display());
+    }
+    eprintln!();
+
+    let selected: Vec<&&WrapperTool> = if assume_yes {
+        eprintln!("  --yes: wrapping all found tools.");
+        found.iter().collect()
+    } else if std::io::stdin().is_terminal() {
+        eprint!("  Which to wrap? Enter numbers (e.g. 1,2) or press Enter for all: ");
+        std::io::stderr().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_lowercase();
+        if input.is_empty() || input == "all" {
+            found.iter().collect()
+        } else {
+            let mut sel = Vec::new();
+            for part in input.split(',') {
+                if let Ok(n) = part.trim().parse::<usize>() {
+                    if n >= 1 && n <= found.len() { sel.push(&found[n - 1]); }
+                }
+            }
+            if sel.is_empty() {
+                eprintln!("  No valid selection. Aborting.");
+                return Ok(());
+            }
+            sel
+        }
+    } else {
+        found.iter().collect()
+    };
+
+    eprintln!();
+    std::fs::create_dir_all(&bin_dir)?;
+    let mut installed_names: Vec<String> = Vec::new();
+
+    for tool in &selected {
+        let wrapper_path = if cfg!(windows) { bin_dir.join(format!("{}.cmd", tool.name)) }
+                           else { bin_dir.join(tool.name) };
+        let script = if cfg!(windows) { generate_windows_wrapper(tool, port) }
+                     else { generate_unix_wrapper(tool, port) };
+        std::fs::write(&wrapper_path, &script)?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&wrapper_path)?.permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&wrapper_path, p)?;
+        }
+
+        // -direct bypass
+        let direct_path = if cfg!(windows) { bin_dir.join(format!("{}-direct.cmd", tool.name)) }
+                          else { bin_dir.join(format!("{}-direct", tool.name)) };
+        std::fs::write(&direct_path, generate_direct_wrapper(tool.name))?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&direct_path)?.permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&direct_path, p)?;
+        }
+
+        eprintln!("  ✓ {}  +  {}-direct (bypass)", tool.name, tool.name);
+        installed_names.push(tool.name.to_string());
+    }
+
+    eprintln!();
+    eprintln!("  ─────────────────────────────────────");
+    eprintln!("  \x1b[1mDone.\x1b[0m");
+    eprintln!();
+    eprintln!("  Add to your PATH once:");
+    if cfg!(windows) {
+        eprintln!("    $env:PATH = \"$HOME\\.mirage\\bin;\" + $env:PATH");
+    } else {
+        eprintln!("    export PATH=\"$HOME/.mirage/bin:$PATH\"");
+        eprintln!("    # Add to ~/.zshrc or ~/.bashrc to persist");
+    }
+    eprintln!();
+    for name in &installed_names {
+        eprintln!("    {}           → filtered through mirage (daemon auto-starts)", name);
+        eprintln!("    {}-direct    → bypasses mirage completely", name);
+    }
+    eprintln!();
+    eprintln!("  To uninstall everything:  mirage-proxy --uninstall");
+    eprintln!();
+    Ok(())
+}
+
+fn uninstall_all() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    eprintln!();
+    eprintln!("  \x1b[1mmirage-proxy — uninstall\x1b[0m");
+    eprintln!("  ─────────────────────────────────────");
+
+    let bin_dir = mirage_dir().join("bin");
+    if bin_dir.exists() {
+        let mut removed = 0usize;
+        for entry in std::fs::read_dir(&bin_dir)? {
+            let path = entry?.path();
+            if path.is_file() {
+                std::fs::remove_file(&path)?;
+                eprintln!("  ✓ Removed {}", path.display());
+                removed += 1;
+            }
+        }
+        if removed == 0 { eprintln!("  (no wrapper scripts found)"); }
+        if std::fs::read_dir(&bin_dir)?.next().is_none() { std::fs::remove_dir(&bin_dir)?; }
+    } else {
+        eprintln!("  (no wrapper directory found)");
+    }
+
+    if std::net::TcpStream::connect("127.0.0.1:8686").is_ok() {
+        eprintln!();
+        eprintln!("  Stopping daemon...");
+        #[cfg(unix)] { let _ = std::process::Command::new("pkill").args(["-f", "mirage-proxy"]).output(); }
+        #[cfg(windows)] { let _ = std::process::Command::new("taskkill").args(["/IM", "mirage-proxy.exe", "/F"]).output(); }
+        eprintln!("  ✓ Daemon stopped");
+    }
+
+    eprintln!();
+    eprintln!("  Done. If you added ~/.mirage/bin to PATH, remove that line from your shell config.");
+    eprintln!();
+    Ok(())
+}
+
+fn generate_direct_wrapper(name: &str) -> String {
+    if cfg!(windows) {
+        format!("@echo off\r\nrem {n}-direct: bypass mirage\r\nfor /f \"tokens=*\" %%i in ('where {n} 2^>nul') do (\r\n    echo %%i | findstr /i /c:\".mirage\\bin\" >nul || ( %%i %* & exit /b %errorlevel% )\r\n)\r\necho could not find real '{n}' 1>&2\r\nexit /b 127\r\n", n = name)
+    } else {
+        format!(r#"#!/bin/sh
+# {n}-direct: run {n} without mirage
+WRAPPER_DIR="$(cd "$(dirname "$0")" && pwd)"
+REAL=""; OLDIFS="$IFS"; IFS=:
+for dir in $PATH; do
+  [ "$dir" = "$WRAPPER_DIR" ] && continue
+  [ -x "$dir/{n}" ] && REAL="$dir/{n}" && break
+done
+IFS="$OLDIFS"
+[ -z "$REAL" ] && {{ echo "could not find real '{n}' in PATH" >&2; exit 127; }}
+exec "$REAL" "$@"
+"#, n = name)
+    }
+}
 
 fn wrapper_install(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let bin_dir = mirage_dir().join("bin");
