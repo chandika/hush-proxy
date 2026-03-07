@@ -33,7 +33,7 @@ Mirage fixes this at the network layer. It sits between your tool and the provid
 
 ### Step 1: Get the binary
 
-**From source (recommended if you don't know the maintainer):**
+**From source:**
 
 ```bash
 cargo install --locked --git https://github.com/chandika/mirage-proxy
