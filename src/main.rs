@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     if args.setup {
-        return setup_interactive(args.port.unwrap_or(8686), args.yes);
+        return setup_interactive(args.port.unwrap_or(8686), args.yes, args.dry_run, args.sensitivity.as_deref());
     }
     if args.uninstall {
         return uninstall_all();
@@ -381,7 +381,7 @@ fn find_tool_in_path(name: &str, skip_dir: &std::path::Path) -> Option<std::path
     None
 }
 
-fn setup_interactive(port: u16, assume_yes: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn setup_interactive(port: u16, assume_yes: bool, dry_run: bool, sensitivity: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::io::{IsTerminal, Write};
     let bin_dir = mirage_dir().join("bin");
 
@@ -469,9 +469,28 @@ fn setup_interactive(port: u16, assume_yes: bool) -> Result<(), Box<dyn std::err
         installed_names.push(tool.name.to_string());
     }
 
+    // Install daemon service so it's always running in background
+    eprintln!();
+    eprintln!("  Installing background daemon...");
+    let exe = std::env::current_exe()?;
+    let exe_str = exe.to_string_lossy().to_string();
+    let mirage_home = mirage_dir();
+    std::fs::create_dir_all(&mirage_home)?;
+
+    let mut extra_args = Vec::new();
+    if dry_run {
+        extra_args.push("--dry-run".to_string());
+    }
+    if let Some(s) = sensitivity {
+        extra_args.push("--sensitivity".to_string());
+        extra_args.push(s.to_string());
+    }
+
+    install_daemon(&exe_str, port, &extra_args, &mirage_home)?;
+
     eprintln!();
     eprintln!("  ─────────────────────────────────────");
-    eprintln!("  \x1b[1mDone.\x1b[0m");
+    eprintln!("  \x1b[1mDone.\x1b[0m Daemon running + wrappers installed.");
     eprintln!();
     eprintln!("  Add to your PATH once:");
     if cfg!(windows) {
@@ -482,9 +501,12 @@ fn setup_interactive(port: u16, assume_yes: bool) -> Result<(), Box<dyn std::err
     }
     eprintln!();
     for name in &installed_names {
-        eprintln!("    {}           → filtered through mirage (daemon auto-starts)", name);
+        eprintln!("    {}           → filtered through mirage", name);
         eprintln!("    {}-direct    → bypasses mirage completely", name);
     }
+    eprintln!();
+    eprintln!("  The daemon runs automatically in the background.");
+    eprintln!("  Wrappers control which tools route through it.");
     eprintln!();
     eprintln!("  To uninstall everything:  mirage-proxy --uninstall");
     eprintln!();
@@ -524,6 +546,8 @@ fn uninstall_all() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     eprintln!();
     eprintln!("  Done. If you added ~/.mirage/bin to PATH, remove that line from your shell config.");
     eprintln!();
+    // Also uninstall the daemon service
+    let _ = uninstall_daemon();
     Ok(())
 }
 
@@ -551,7 +575,7 @@ fn wrapper_install(port: u16) -> Result<(), Box<dyn std::error::Error + Send + S
     std::fs::create_dir_all(&bin_dir)?;
 
     eprintln!();
-    eprintln!("  \x1b[1mmirage-proxy\x1b[0m — installing wrappers");
+    eprintln!("  \x1b[1mmirage-proxy\x1b[0m — installing wrappers + daemon");
     eprintln!("  ─────────────────────────────────────");
 
     let mut installed = Vec::new();
@@ -586,6 +610,14 @@ fn wrapper_install(port: u16) -> Result<(), Box<dyn std::error::Error + Send + S
     eprintln!();
     eprintln!("  Installed wrappers: {}", installed.join(", "));
     eprintln!();
+    eprintln!("  Installing background daemon...");
+    let exe = std::env::current_exe()?;
+    let exe_str = exe.to_string_lossy().to_string();
+    let mirage_home = mirage_dir();
+    std::fs::create_dir_all(&mirage_home)?;
+    install_daemon(&exe_str, port, &[], &mirage_home)?;
+
+    eprintln!();
     eprintln!("  Add to your PATH (once):");
     if cfg!(windows) {
         eprintln!(
@@ -601,12 +633,9 @@ fn wrapper_install(port: u16) -> Result<(), Box<dyn std::error::Error + Send + S
         eprintln!("    # Add that line to ~/.zshrc or ~/.bashrc to persist");
     }
     eprintln!();
-    eprintln!("  How it works:");
-    eprintln!("    $ claude          # ← uses wrapper, traffic goes through mirage");
-    eprintln!("    $ /usr/local/bin/claude  # ← direct, no mirage (original binary)");
-    eprintln!();
-    eprintln!("  No global env vars are set. Other tools are unaffected.");
-    eprintln!("  The daemon must be running: mirage-proxy --service-install (or start manually).");
+    eprintln!("  Done. Daemon runs in background. Wrappers control which tools use it.");
+    eprintln!("    claude          → filtered through mirage");
+    eprintln!("    claude-direct   → bypasses mirage");
     eprintln!();
 
     Ok(())
