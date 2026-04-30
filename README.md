@@ -1,6 +1,6 @@
 # mirage-proxy
 
-**Your LLM agent sees fake secrets. Your real ones never leave your machine.**
+**Your local AI coding agent sees fake secrets. Your real ones never leave your machine.**
 
 ![Mirage Proxy demo](assets/mirage-proxy-preview.gif)
 
@@ -10,17 +10,39 @@ You:    lee.taylor56789@aol.com     →  Agent sees:  chris.hall456@gmail.com
 You:    ghp_abc123secrettoken       →  Agent sees:  ghp_xyz789differentkey
 ```
 
-Single binary. Sub-millisecond. No config needed.
+Single binary. Sub-millisecond. No config needed. Works with Claude Code, Cursor, Cline, Aider, Codex CLI, Continue.dev, and any other tool that reads your filesystem and routes through a configurable base URL.
 
 ---
 
-## Why
+## Why now
 
-Coding agents send your entire working context to cloud APIs — open files, git history, env vars, shell output. If a secret is anywhere in that context, it transits upstream.
+In April 2026 alone:
 
-Mirage sits between your tool and the provider. It replaces sensitive data with **plausible fakes** before the request leaves your machine, then rehydrates the originals in the response. The model processes fake data and never knows. Your real secrets stay local.
+- **"Comment and Control"** — a single GitHub-comment prompt injection hijacked Claude Code, Gemini CLI, and Copilot Agent **simultaneously** and exfiltrated their API keys plus `GITHUB_TOKEN`. Anthropic rated it CVSS 9.4. Combined bug bounty paid: $1,937. No CVE filed. ([SecurityWeek](https://www.securityweek.com/claude-code-gemini-cli-github-copilot-agents-vulnerable-to-prompt-injection-via-comments/), [The Register](https://www.theregister.com/2026/04/15/claude_gemini_copilot_agents_hijacked/))
+- **MCP "by-design" RCE** — OX Security disclosed an STDIO transport flaw in 200K MCP servers, 150M downloads. Anthropic declined to patch and called it "expected behavior." ([TheHackerNews](https://thehackernews.com/2026/04/anthropic-mcp-design-vulnerability.html))
+- **GitGuardian State of Secrets Sprawl 2026** — 24,008 secrets found in public MCP config files; 2,117 confirmed live. AI-credential leaks up 81% YoY. ([GitGuardian](https://blog.gitguardian.com/the-state-of-secrets-sprawl-2026/))
 
-Other tools use visible tokens like `[REDACTED]` or `[[PERSON_1]]`. The model knows data was removed and adapts — refusing to help, asking for the missing values, generating broken code. Mirage's fakes are invisible. The model behaves normally because the request looks normal.
+Every adjacent fix — Cursor 2.5 sandboxing, Codex's egress allowlist, GitGuardian's scanners — treats the agent process as the trust boundary. **None of them stop secrets reaching the model in the first place.**
+
+Mirage is data-layer defense. It sits between your local tool and the cloud LLM, substitutes plausible fakes for real secrets *before* egress, and rehydrates the originals in the response. If a Comment-and-Control payload runs against an agent behind Mirage, the attacker walks away with a key that doesn't open anything.
+
+---
+
+## What this does and does not protect
+
+Mirage is a **localhost proxy**. It only sees traffic that passes through `127.0.0.1:8686`.
+
+| Surface | Protected? |
+|---|---|
+| Claude Code CLI, Cursor, Cline, Codex CLI, Aider, Continue.dev, OpenClaw, any SDK with a configurable base URL | ✅ Yes |
+| GitHub Action runners running Claude Code / Gemini CLI / Codex (with `mirage-action`, planned v0.9) | ⚠️ Roadmap |
+| chatgpt.com web, claude.ai web, Claude Desktop, JetBrains AI, Copilot Chat (IDE) | ❌ No — browser/cloud bypasses localhost |
+| Claude Cowork (runs in an Apple Virtualization Framework VM with its own network namespace) | ❌ No — VM egress doesn't traverse host loopback |
+| Pasting code into a web UI by hand | ❌ No — different threat model; consider `mirage-clipboard` (planned) |
+
+If your team uses local agentic CLIs and you want a layer the protocol owner cannot revoke, this is the tool. If your team uses hosted UIs, the threat model is different and so is the answer.
+
+Why fakes, not `[REDACTED]`? Other tools use visible tokens like `[REDACTED]` or `[[PERSON_1]]`. The model knows data was removed and adapts — refusing to help, asking for the missing values, generating broken code. Mirage's fakes are invisible. The model behaves normally because the request looks normal.
 
 ---
 
@@ -119,6 +141,74 @@ mirage status   # daemon running? filter active?
 mirage logs     # live tail of redactions
 ```
 
+```bash
+curl -s http://127.0.0.1:8686/healthz   # liveness check
+```
+
+### Shadow mode (recommended for the first 24 hours)
+
+Want to see what mirage catches before it changes a single byte?
+
+```bash
+mirage-proxy --setup --shadow
+```
+
+Traffic passes through unmodified. Detections are logged with a `SHADOW` banner so you can spot false positives, vet the substitutions on real workloads, and only enforce when you trust it. `--shadow` is an alias for `--dry-run`.
+
+```
+  mirage-proxy v0.8.2
+  ─────────────────────────────────────
+  listen:  http://127.0.0.1:8686
+  target:  multi-provider (auto-route)
+  mode:    SHADOW (medium sensitivity) — detections logged, traffic not modified
+```
+
+To switch to enforcement once you trust it:
+
+```bash
+mirage-proxy --uninstall
+mirage-proxy --setup
+```
+
+### When mirage substitutes the wrong thing
+
+Two commands handle false positives. Both talk to the running daemon — no restart needed.
+
+**`mirage-proxy --why <decoy>`** — explain a substitution. Useful when something downstream broke and you want to know what mirage did:
+
+```
+$ mirage-proxy --why chris.hall456@gmail.com
+
+  mirage why chris.hall456@gmail.com
+  ─────────────────────────────────────
+  session:  claude-sonnet-4-6
+  length:   24 chars
+  md5:      a8f3...
+
+  to forgive this substitution, run:
+    mirage-proxy --flag 'chris.hall456@gmail.com'
+```
+
+**`mirage-proxy --flag <decoy>`** — tell mirage to stop substituting the underlying value. Persists to `~/.mirage/flags.jsonl`. Session-scoped: re-applied flags take effect after a daemon restart in v0.8.x.
+
+```
+$ mirage-proxy --flag chris.hall456@gmail.com
+
+  mirage flag chris.hall456@gmail.com
+  ─────────────────────────────────────
+  ✓ flagged. mirage will pass this value through unchanged.
+  scope: this daemon process; persisted to ~/.mirage/flags.jsonl
+```
+
+### What mirage refuses to substitute (false-positive guards, v0.8.2)
+
+Three content shapes that cost the most time in earlier versions are now hard-skipped:
+
+- **JWTs** (`header.payload.signature`) — substituting any segment breaks signature verification
+- **Hex digests** (sha256, sha512) — break lockfile installs and CI hashes
+- **SRI integrity values** (`sha256-...`, `sha512-...`) — break npm/pnpm package-lock installs
+
+Anthropic-signed thinking blocks, Codex `encrypted_content` envelopes, and binary/multipart request payloads are also skipped (existing behavior, retained).
 ---
 
 ## What it catches
@@ -197,12 +287,14 @@ audit:
   log_values: false
 ```
 
-| Sensitivity | What gets filtered |
-|---|---|
-| `low` | Secrets & credentials only |
-| `medium` | Secrets + PII (email, phone) — **default** |
-| `high` | Everything including warn-only |
-| `paranoid` | All detected patterns |
+| Sensitivity | What gets substituted | Low-confidence detections (IPs, generic entropy) |
+|---|---|---|
+| `low` | High-confidence vendor-prefixed secrets only (AWS, GitHub, etc.) | Warn-only |
+| `medium` (default) | High + medium-confidence (emails, phones, generic `sk-`/`AIza` keys) | Warn-only |
+| `high` | Everything including warn-only categories | Substituted |
+| `paranoid` | All detected patterns regardless of rules | Substituted |
+
+**Confidence grading (v0.8.2)**: every detection carries a confidence score. Vendor-prefixed and structural matches (AWS keys, GitHub tokens, SSNs, BEGIN PRIVATE KEY, RFC connection strings) are `high`. Emails, phones, and generic API keys are `medium`. IPs and unbounded high-entropy strings are `low` — these used to silently substitute at default sensitivity and were a frequent false-positive source. They now warn instead. Bump to `high` or `paranoid` if you want the old aggressive behavior.
 
 ---
 
@@ -220,22 +312,28 @@ audit:
 ```
 mirage-proxy [OPTIONS]
 
-  --setup                     Install wrappers + daemon (recommended)
-  --uninstall                 Remove everything: wrappers + daemon
-  --wrapper-install           Install wrappers only
-  --wrapper-uninstall         Remove wrappers only
-  --service-install           Install daemon only + shell integration
-  --service-uninstall         Remove daemon + shell integration
-  --service-status            Show daemon status
-  -p, --port <PORT>           Listen port [default: 8686]
-  -b, --bind <ADDR>           Bind address [default: 127.0.0.1]
-  -c, --config <PATH>         Config file path
-      --sensitivity <LEVEL>   low | medium | high | paranoid
-      --dry-run               Log detections without modifying traffic
-      --vault-key <PHRASE>    Vault passphrase (or MIRAGE_VAULT_KEY env)
-      --list-providers        Show all 28+ built-in provider routes
-      --yes                   Skip interactive confirmation prompts
-      --no-update-check       Skip version check on startup
+  --setup                         Install wrappers + daemon (recommended)
+  --uninstall                     Remove everything: wrappers + daemon
+  --wrapper-install               Install wrappers only
+  --wrapper-uninstall             Remove wrappers only
+  --service-install               Install daemon only + shell integration
+  --service-uninstall             Remove daemon + shell integration
+  --service-status                Show daemon status
+  -p, --port <PORT>               Listen port [default: 8686]
+  -b, --bind <ADDR>               Bind address [default: 127.0.0.1]
+  -c, --config <PATH>             Config file path
+      --sensitivity <LEVEL>       low | medium | high | paranoid
+      --shadow                    Pass traffic through unchanged; log substitutions
+                                  that would have happened (alias of --dry-run)
+      --dry-run                   Same as --shadow
+      --why <DECOY>               Ask the running daemon to explain a substitution
+      --flag <DECOY>              Ask the running daemon to stop substituting the
+                                  original behind a decoy (persists to
+                                  ~/.mirage/flags.jsonl)
+      --vault-key <PASSPHRASE>    Vault passphrase (or MIRAGE_VAULT_KEY env)
+      --list-providers            Show all 28+ built-in provider routes
+      --yes                       Skip interactive confirmation prompts
+      --no-update-check           Skip version check on startup
   -h, --help
   -V, --version
 ```
@@ -248,6 +346,14 @@ mirage logs     # live tail of detections
 mirage on       # route this terminal through mirage
 mirage off      # this terminal goes direct (daemon keeps running)
 ```
+
+### HTTP endpoints (on the running daemon)
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/healthz` | GET | Status + counters |
+| `/why?decoy=<value>` | GET | Look up the kind, session, and md5 of the original behind a decoy |
+| `/flag?decoy=<value>` | POST | Add the original behind a decoy to the session pass-through list |
 
 ---
 
@@ -262,6 +368,10 @@ mirage off      # this terminal goes direct (daemon keeps running)
 - [x] Native OpenClaw integration (ClawdHub skill)
 - [x] Provider bypass list
 - [x] `--setup`: unified installer (wrappers + daemon in one step)
+- [x] **v0.8.2**: shadow mode banner, `--why` / `--flag`, JWT/digest/SRI false-positive guards, confidence grading (high/medium/low) with low-confidence demoted to warn-only at low/medium sensitivity
+- [ ] **v0.9**: `mirage-action` GitHub Action wrapper for agentic CI
+- [ ] **v0.9**: `mirage scan-mcp-configs` — find leaked secrets in `~/.cursor/mcp.json`, `~/.claude.json`, etc.
+- [ ] **v0.10**: Comment-and-Control regression test fixture (replay payload, assert decoy exfil)
 - [ ] Signed release artifacts + provenance attestation
 - [ ] Custom pattern definitions in config
 - [ ] Optional ONNX NER for name/organization detection

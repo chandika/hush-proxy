@@ -59,6 +59,25 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
+    /// Shadow mode: alias of --dry-run. Pass traffic through unchanged but
+    /// print the substitutions Mirage *would* have made. Recommended for the
+    /// first 24 hours after install so you can spot false positives before
+    /// they block your workflow.
+    #[arg(long)]
+    shadow: bool,
+
+    /// Explain a decoy/fake value: queries the running daemon's `/why` endpoint
+    /// and prints the kind, session, and md5 fingerprint of the original.
+    /// Does not start the proxy. Example: `mirage-proxy --why chris.hall456@gmail.com`.
+    #[arg(long, value_name = "DECOY")]
+    why: Option<String>,
+
+    /// Flag a decoy/fake value: queries the running daemon's `/flag` endpoint
+    /// so the underlying original is no longer substituted in this session.
+    /// Persisted to ~/.mirage/flags.jsonl. Does not start the proxy.
+    #[arg(long, value_name = "DECOY")]
+    flag: Option<String>,
+
     /// Sensitivity level (low, medium, high, paranoid)
     #[arg(long)]
     sensitivity: Option<String>,
@@ -167,6 +186,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args.service_status {
         return service_status();
     }
+    if let Some(ref decoy) = args.why {
+        return query_daemon("why", decoy, &args).await;
+    }
+    if let Some(ref decoy) = args.flag {
+        return query_daemon("flag", decoy, &args).await;
+    }
 
     // Load config, override with CLI args
     let mut cfg = Config::load(args.config.as_deref());
@@ -177,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(bind) = args.bind {
         cfg.bind = bind;
     }
-    if args.dry_run {
+    if args.dry_run || args.shadow {
         cfg.dry_run = true;
     }
     if args.no_update_check {
@@ -225,6 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         audit_log,
         stats: stats.clone(),
         seen_pii: Mutex::new(HashSet::new()),
+        flagged_originals: Mutex::new(HashSet::new()),
     });
 
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse()?;
@@ -246,11 +272,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "           ... and {} more (--list-providers)",
         providers::PROVIDERS.len() - 4
     );
-    eprintln!(
-        "  mode:    {}{}",
-        if cfg.dry_run { "dry-run " } else { "" },
-        format!("{:?}", cfg.sensitivity).to_lowercase()
-    );
+    if cfg.dry_run {
+        eprintln!(
+            "  mode:    \x1b[33mSHADOW\x1b[0m ({} sensitivity) — detections logged, traffic not modified",
+            format!("{:?}", cfg.sensitivity).to_lowercase()
+        );
+    } else {
+        eprintln!(
+            "  mode:    \x1b[32menforce\x1b[0m ({} sensitivity)",
+            format!("{:?}", cfg.sensitivity).to_lowercase()
+        );
+    }
     if cfg.audit.enabled {
         eprintln!("  audit:   {}", cfg.audit.path.display());
     }
@@ -309,6 +341,107 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
         });
+    }
+}
+
+/// Send a `why` or `flag` query to the running daemon and pretty-print the result.
+/// Used by `mirage-proxy --why <decoy>` and `mirage-proxy --flag <decoy>`.
+async fn query_daemon(
+    op: &str,
+    decoy: &str,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let port = args.port.unwrap_or(8686);
+    let bind = args.bind.clone().unwrap_or_else(|| "127.0.0.1".to_string());
+    let encoded: String = decoy
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{:02X}", b),
+        })
+        .collect();
+    let url = format!("http://{}:{}/{}?decoy={}", bind, port, op, encoded);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let req = if op == "flag" {
+        client.post(&url)
+    } else {
+        client.get(&url)
+    };
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!();
+            eprintln!("  could not reach mirage daemon at {}", url);
+            eprintln!("  is it running?  mirage-proxy --service-status");
+            eprintln!("  ({})", e);
+            std::process::exit(2);
+        }
+    };
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::Value::String(text.clone()));
+
+    eprintln!();
+    if op == "why" {
+        eprintln!("  \x1b[1mmirage why\x1b[0m {}", short_decoy(decoy));
+        eprintln!("  ─────────────────────────────────────");
+        if parsed.get("found").and_then(|v| v.as_bool()) == Some(true) {
+            eprintln!(
+                "  session:  {}",
+                parsed.get("session").and_then(|v| v.as_str()).unwrap_or("?")
+            );
+            eprintln!(
+                "  length:   {} chars",
+                parsed.get("original_length").and_then(|v| v.as_u64()).unwrap_or(0)
+            );
+            eprintln!(
+                "  md5:      {}",
+                parsed.get("original_md5").and_then(|v| v.as_str()).unwrap_or("?")
+            );
+            eprintln!();
+            eprintln!("  to forgive this substitution, run:");
+            eprintln!("    mirage-proxy --flag '{}'", decoy);
+        } else {
+            eprintln!(
+                "  no record. {}",
+                parsed.get("hint").and_then(|v| v.as_str()).unwrap_or("")
+            );
+        }
+    } else {
+        eprintln!("  \x1b[1mmirage flag\x1b[0m {}", short_decoy(decoy));
+        eprintln!("  ─────────────────────────────────────");
+        if parsed.get("flagged").and_then(|v| v.as_bool()) == Some(true) {
+            eprintln!("  ✓ flagged. mirage will pass this value through unchanged.");
+            eprintln!(
+                "  scope: {}",
+                parsed.get("scope").and_then(|v| v.as_str()).unwrap_or("session")
+            );
+        } else {
+            eprintln!(
+                "  ✗ {}",
+                parsed.get("reason").and_then(|v| v.as_str()).unwrap_or("not flagged")
+            );
+        }
+    }
+    eprintln!();
+    if !status.is_success() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn short_decoy(s: &str) -> String {
+    if s.len() <= 24 {
+        s.to_string()
+    } else {
+        format!("{}...{}", &s[..10], &s[s.len() - 6..])
     }
 }
 

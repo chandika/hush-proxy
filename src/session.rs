@@ -57,6 +57,25 @@ impl SessionManager {
         "default".to_string()
     }
 
+    /// Find which session produced a given decoy/fake value, and return the
+    /// original alongside its session id. Used by `/why?decoy=...`.
+    pub fn lookup_decoy(&self, fake: &str) -> Option<(String, String)> {
+        let sessions = self.sessions.lock().unwrap();
+        for (sid, faker) in sessions.iter() {
+            if let Some(original) = faker.lookup_original(fake) {
+                return Some((sid.clone(), original));
+            }
+        }
+        // Fall back to the vault directly (covers fakes from older sessions
+        // that aren't currently loaded into a Faker).
+        if let Some(ref vault) = self.vault {
+            if let Some((sid, _kind, original)) = vault.lookup_fake(fake) {
+                return Some((sid, original));
+            }
+        }
+        None
+    }
+
     /// Clean up sessions that haven't been used recently
     #[allow(dead_code)]
     pub fn cleanup_stale(&self, max_sessions: usize) {

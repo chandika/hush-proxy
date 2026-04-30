@@ -220,11 +220,27 @@ impl Vault {
         inner.forward.get(original).map(|e| e.fake.clone())
     }
 
-    /// Look up original for a fake value (for rehydration)
-    #[cfg(test)]
+    /// Look up original for a fake value (for rehydration and `mirage why`).
     pub fn get_original(&self, fake: &str) -> Option<String> {
         let inner = self.inner.lock().unwrap();
         inner.reverse.get(fake).map(|(_, original)| original.clone())
+    }
+
+    /// Look up the (session_id, kind, original) for a fake value.
+    /// Used by the `/why` endpoint to explain a substitution without leaking
+    /// the original to the caller — only the kind label and session id are returned.
+    pub fn lookup_fake(&self, fake: &str) -> Option<(String, String, String)> {
+        let inner = self.inner.lock().unwrap();
+        let (session_id, original) = inner.reverse.get(fake)?.clone();
+        // Find the kind by walking the session map (entries keyed by original).
+        let kind = inner
+            .sessions
+            .get(&session_id)
+            .and_then(|s| s.entries.get(&original))
+            .map(|e| e.kind.clone())
+            .or_else(|| inner.forward.get(&original).map(|e| e.kind.clone()))
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+        Some((session_id, kind, original))
     }
 
     /// Get all reverse mappings for rehydration

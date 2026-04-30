@@ -46,6 +46,7 @@ impl AuditLog {
         action: &RedactAction,
         original: &str,
         context: &str,
+        confidence: f64,
     ) {
         let action_str = match action {
             RedactAction::Redact => "redacted",
@@ -65,7 +66,7 @@ impl AuditLog {
             timestamp: chrono::Utc::now().to_rfc3339(),
             kind: kind.to_string(),
             action: action_str.to_string(),
-            confidence: 1.0, // For now, all pattern matches are 1.0
+            confidence,
             value_hash: Some(format!("{:x}", md5::compute(original.as_bytes()))),
             original: if self.log_values {
                 Some(original.to_string())

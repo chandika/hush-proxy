@@ -11,9 +11,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, warn};
 
 use crate::audit::AuditLog;
-use crate::config::{Config, RedactAction};
+use crate::config::{Config, RedactAction, Sensitivity};
 use crate::faker::Faker;
-use crate::redactor::detect;
+use crate::redactor::{detect, Confidence};
 use crate::session::SessionManager;
 use crate::stats::Stats;
 
@@ -60,6 +60,10 @@ pub struct ProxyState {
     pub stats: Arc<Stats>,
     /// Global set of PII values already seen (by hash) — dedup across all sessions
     pub seen_pii: Mutex<HashSet<String>>,
+    /// Originals the user has explicitly flagged via `mirage flag <decoy>` —
+    /// detect() will still flag these but smart_redact will skip substitution.
+    /// Session-scoped: cleared on daemon restart.
+    pub flagged_originals: Mutex<HashSet<String>>,
 }
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -77,6 +81,154 @@ fn error_response(status: StatusCode, msg: &str) -> Response<BoxBody> {
         .header("content-type", "application/json")
         .body(full_body(Bytes::from(body.to_string())))
         .unwrap()
+}
+
+/// Parse `?decoy=...` from a request path. Returns the URL-decoded value or None.
+fn parse_decoy_param(path_and_query: &str) -> Option<String> {
+    let q = path_and_query.split_once('?').map(|(_, q)| q)?;
+    for pair in q.split('&') {
+        if let Some(value) = pair.strip_prefix("decoy=") {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+/// Minimal percent-decoder for query values. We only need it for `mirage why`
+/// where users may paste decoys containing `+` or `%` characters.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let h = &s[i + 1..i + 3];
+                if let Ok(b) = u8::from_str_radix(h, 16) {
+                    out.push(b);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// `GET /why?decoy=<fake>` — explain a substitution to the user without
+/// leaking the original value. Returns kind, session id, and a md5 fingerprint
+/// the user can compare against an audit log entry.
+fn why_response(path_and_query: &str, state: &ProxyState) -> Response<BoxBody> {
+    let decoy = match parse_decoy_param(path_and_query) {
+        Some(d) if !d.is_empty() => d,
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "missing ?decoy=<value>",
+            );
+        }
+    };
+
+    let body = match state.sessions.lookup_decoy(&decoy) {
+        Some((session_id, original)) => {
+            let fingerprint = format!("{:x}", md5::compute(original.as_bytes()));
+            let len = original.chars().count();
+            serde_json::json!({
+                "decoy": decoy,
+                "session": session_id,
+                "original_length": len,
+                "original_md5": fingerprint,
+                "found": true,
+                "hint": "to undo this substitution for the rest of this session, run: mirage flag <decoy>",
+            })
+        }
+        None => serde_json::json!({
+            "decoy": decoy,
+            "found": false,
+            "hint": "no record. either the decoy is from a previous daemon run, or the value never passed through mirage.",
+        }),
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(full_body(Bytes::from(body.to_string())))
+        .unwrap()
+}
+
+/// `POST /flag?decoy=<fake>` — add the corresponding original to the
+/// session-scoped allowlist so smart_redact stops substituting it.
+fn flag_response(path_and_query: &str, state: &ProxyState) -> Response<BoxBody> {
+    let decoy = match parse_decoy_param(path_and_query) {
+        Some(d) if !d.is_empty() => d,
+        _ => return error_response(StatusCode::BAD_REQUEST, "missing ?decoy=<value>"),
+    };
+
+    let (session_id, original) = match state.sessions.lookup_decoy(&decoy) {
+        Some(pair) => pair,
+        None => {
+            let body = serde_json::json!({
+                "flagged": false,
+                "reason": "no record for that decoy. is the daemon a different one than the one that produced it?",
+            });
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("content-type", "application/json")
+                .body(full_body(Bytes::from(body.to_string())))
+                .unwrap();
+        }
+    };
+
+    {
+        let mut flagged = state.flagged_originals.lock().unwrap();
+        flagged.insert(original.clone());
+    }
+
+    // Best-effort persistence so a daemon restart can replay flags.
+    persist_flag(&original);
+
+    let body = serde_json::json!({
+        "flagged": true,
+        "decoy": decoy,
+        "session": session_id,
+        "original_md5": format!("{:x}", md5::compute(original.as_bytes())),
+        "scope": "this daemon process; persisted to ~/.mirage/flags.jsonl",
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(full_body(Bytes::from(body.to_string())))
+        .unwrap()
+}
+
+fn persist_flag(original: &str) {
+    let dir = dirs_next::home_dir().map(|h| h.join(".mirage"));
+    let Some(dir) = dir else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("flags.jsonl");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let entry = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "original_md5": format!("{:x}", md5::compute(original.as_bytes())),
+            "original": original, // local-only; ~/.mirage is not synced
+        });
+        let _ = writeln!(f, "{}", entry);
+    }
 }
 
 fn health_response(state: &ProxyState) -> Response<BoxBody> {
@@ -171,6 +323,12 @@ pub async fn handle_request(
 
     if path == "/healthz" {
         return Ok(health_response(&state));
+    }
+    if path.starts_with("/why") {
+        return Ok(why_response(&path, &state));
+    }
+    if path.starts_with("/flag") {
+        return Ok(flag_response(&path, &state));
     }
 
     debug!("{} {}", method, path);
@@ -718,7 +876,28 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
 
     for entity in &entities {
         let label = entity.kind.label();
-        let action = state.config.should_redact(label);
+        let mut action = state.config.should_redact(label);
+
+        // Confidence gate (v0.8.1): Low-confidence patterns (IPs, generic
+        // high-entropy strings) demote to Warn at low/medium sensitivity.
+        // High and Paranoid sensitivity keep aggressive substitution.
+        if entity.confidence == Confidence::Low
+            && matches!(state.config.sensitivity, Sensitivity::Low | Sensitivity::Medium)
+            && matches!(action, RedactAction::Redact | RedactAction::Mask)
+        {
+            action = RedactAction::Warn;
+        }
+
+        // User-flagged originals: skip substitution but still log a one-line
+        // notice so the user knows the flag is in effect.
+        let is_flagged = {
+            let flagged = state.flagged_originals.lock().unwrap();
+            flagged.contains(&entity.original)
+        };
+        if is_flagged {
+            eprint!("\r\x1b[2K  ⏭️  {} (user-flagged, passing through)\n", label);
+            continue;
+        }
 
         // Global dedup: check if we've ever seen this exact value
         let is_new = {
@@ -729,7 +908,7 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
         // Only audit-log and count genuinely new detections
         if is_new {
             if let Some(ref audit) = state.audit_log {
-                audit.log(label, &action, &entity.original, text);
+                audit.log(label, &action, &entity.original, text, entity.confidence.score());
             }
         }
 

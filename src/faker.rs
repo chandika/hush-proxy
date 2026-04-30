@@ -40,6 +40,10 @@ impl FakerMaps {
         fake
     }
 
+    fn lookup(&self, fake: &str) -> Option<String> {
+        self.reverse.get(fake).cloned()
+    }
+
     fn rehydrate(&self, text: &str) -> String {
         let mut result = text.to_string();
         // Sort by length descending to avoid partial replacements
@@ -189,6 +193,20 @@ impl Faker {
     /// Rehydrate: restore fakes back to originals
     pub fn rehydrate(&self, text: &str) -> String {
         self.maps.lock().unwrap().rehydrate(text)
+    }
+
+    /// Look up the original value for a fake (used by `mirage why <decoy>`).
+    /// Checks in-memory maps first, then falls back to the encrypted vault.
+    pub fn lookup_original(&self, fake: &str) -> Option<String> {
+        if let Some(orig) = self.maps.lock().unwrap().lookup(fake) {
+            return Some(orig);
+        }
+        self.vault.as_ref().and_then(|v| v.get_original(fake))
+    }
+
+    #[allow(dead_code)]
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 }
 
