@@ -61,6 +61,10 @@ audit:
 # Dry run: log what would be redacted without actually redacting
 dry_run: false
 
+# Buffer streaming responses: collect all SSE chunks before rehydrating
+# Eliminates chunk-boundary rehydration issues; increases first-token latency
+force_no_stream: false
+
 # Check GitHub releases for newer mirage-proxy versions at startup
 update_check:
   enabled: true

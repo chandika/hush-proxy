@@ -27,6 +27,8 @@ pub struct Config {
     #[serde(default)]
     pub dry_run: bool,
     #[serde(default)]
+    pub force_no_stream: bool,
+    #[serde(default)]
     pub update_check: UpdateCheckConfig,
 }
 
@@ -184,6 +186,7 @@ impl Config {
             bypass: vec![],
             audit: AuditConfig::default(),
             dry_run: false,
+            force_no_stream: false,
             update_check: UpdateCheckConfig::default(),
         }
     }

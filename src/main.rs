@@ -102,6 +102,10 @@ struct Args {
     #[arg(long)]
     no_update_check: bool,
 
+    /// Buffer streaming responses: collect all SSE chunks before rehydrating
+    #[arg(long)]
+    no_stream: bool,
+
     /// Install as background service + shell integration (launchd/systemd/Task Scheduler)
     #[arg(long)]
     service_install: bool,
@@ -208,6 +212,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args.no_update_check {
         cfg.update_check.enabled = false;
     }
+    if args.no_stream {
+        cfg.force_no_stream = true;
+    }
     if let Some(ref s) = args.sensitivity {
         cfg.sensitivity = match s.as_str() {
             "low" => config::Sensitivity::Low,
@@ -282,6 +289,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "  mode:    \x1b[32menforce\x1b[0m ({} sensitivity)",
             format!("{:?}", cfg.sensitivity).to_lowercase()
         );
+    }
+    if cfg.force_no_stream {
+        eprintln!("  stream:   \x1b[33mbuffered\x1b[0m (SSE collected before delivery)");
     }
     if cfg.audit.enabled {
         eprintln!("  audit:   {}", cfg.audit.path.display());

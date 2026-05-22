@@ -561,6 +561,55 @@ mod tests {
     }
 
     #[test]
+    fn test_ip_rehydrate_contiguous() {
+        // NOTE: fake_ip(1) always produces 47.53.71.98 (collision with the IP
+        // 47.53.71.98 itself). Using any other original avoids the collision:
+        // the first call gets n=1 → fake is always 47.53.71.98.
+        let faker = Faker::new(None, None);
+        let original = "192.168.1.100";
+        let fake = faker.fake(original, &PiiKind::IpAddress);
+        // The first IP always gets counter=1 → 47.53.71.98
+        assert_eq!(fake, "47.53.71.98");
+        assert_ne!(fake, original);
+
+        // When the fake appears contiguously at token boundaries, rehydration works
+        let text = format!("My IP is {}", fake);
+        let rehydrated = faker.rehydrate(&text);
+        assert_eq!(rehydrated, format!("My IP is {}", original));
+    }
+
+    #[test]
+    fn test_ip_rehydrate_sse_split() {
+        let faker = Faker::new(None, None);
+        let original = "10.0.0.1";
+        let fake = faker.fake(original, &PiiKind::IpAddress);
+        // First call → counter=1 → 47.53.71.98 (same as above since it starts a new Faker)
+        assert_eq!(fake, "47.53.71.98");
+
+        // Simulate buffered SSE body where the IP is split across delta.content fields.
+        // Even with --no-stream the full IP never appears contiguously in the raw body.
+        let sse_body = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"The IP is {}\"}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{\"content\":\".{}\"}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{\"content\":\".{}\"}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{\"content\":\".{}\"}}}}]}}\n\n\
+             data: [DONE]\n\n",
+            "47", "53", "71", "98"
+        );
+
+        let rehydrated = faker.rehydrate(&sse_body);
+
+        // The fake IP "47.53.71.98" does NOT appear contiguously in the body.
+        // Each octet/dot is in a separate delta.content field.
+        // rehydrate() finds no match — the fragments remain unreplaced.
+        assert!(rehydrated.contains("47"));
+        assert!(rehydrated.contains("53"));
+        assert!(rehydrated.contains("71"));
+        assert!(rehydrated.contains("98"));
+        assert!(!rehydrated.contains(original), "original should NOT appear — rehydration missed the split IP");
+    }
+
+    #[test]
     fn test_connection_string_protocol_preserved() {
         let faker = Faker::new(None, None);
         let conn = "mongodb+srv://admin:secret@cluster0.abc.mongodb.net/mydb";

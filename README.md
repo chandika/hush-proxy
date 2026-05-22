@@ -326,6 +326,9 @@ mirage-proxy [OPTIONS]
       --shadow                    Pass traffic through unchanged; log substitutions
                                   that would have happened (alias of --dry-run)
       --dry-run                   Same as --shadow
+      --no-stream                 Buffer streaming responses; collect all SSE
+                                  chunks before rehydrating (eliminates boundary
+                                  split issues, increases first-token latency)
       --why <DECOY>               Ask the running daemon to explain a substitution
       --flag <DECOY>              Ask the running daemon to stop substituting the
                                   original behind a decoy (persists to

@@ -554,7 +554,11 @@ pub async fn handle_request(
         .unwrap_or(false);
 
     if is_stream {
-        handle_streaming_response(status, resp_headers, response, state, session_faker).await
+        if state.config.force_no_stream {
+            handle_streaming_as_regular(status, resp_headers, response, state, session_faker).await
+        } else {
+            handle_streaming_response(status, resp_headers, response, state, session_faker).await
+        }
     } else {
         handle_regular_response(status, resp_headers, response, state, session_faker).await
     }
@@ -748,6 +752,145 @@ async fn handle_regular_response(
     Ok(builder
         .body(full_body(Bytes::from(rehydrated_body)))
         .unwrap())
+}
+
+/// Parse SSE body, extract and join all `delta.content` values,
+/// rehydrate the joined content, and reconstruct SSE events.
+/// Puts all rehydrated content in the first content chunk;
+/// clears `delta.content` from subsequent chunks.
+/// This fixes PII that gets split across SSE chunk boundaries
+/// (e.g. IP addresses where "84.106.142.195" arrives as separate tokens).
+fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
+    let text = text.replace("\r\n", "\n");
+    let events: Vec<&str> = text.split("\n\n").collect();
+    let mut out_events: Vec<String> = Vec::with_capacity(events.len());
+    let mut full_content = String::new();
+    let mut content_indices: Vec<usize> = Vec::new();
+    let mut content_jsons: Vec<String> = Vec::new();
+
+    for event in &events {
+        if event.is_empty() {
+            out_events.push(String::new());
+            continue;
+        }
+        if let Some(data_str) = event.strip_prefix("data: ") {
+            if data_str.trim() == "[DONE]" {
+                out_events.push(event.to_string());
+                continue;
+            }
+            match serde_json::from_str::<Value>(data_str) {
+                Ok(val) => {
+                    if let Some(content) = val["choices"][0]["delta"]["content"].as_str() {
+                        if !content.is_empty() {
+                            full_content.push_str(content);
+                            content_indices.push(out_events.len());
+                            content_jsons.push(data_str.to_string());
+                        }
+                    }
+                    out_events.push(event.to_string());
+                }
+                Err(_) => {
+                    out_events.push(event.to_string());
+                }
+            }
+        } else {
+            out_events.push(event.to_string());
+        }
+    }
+
+    if content_indices.is_empty() {
+        return text;
+    }
+
+    let rehydrated = faker.rehydrate(&full_content);
+
+    // Return original if nothing changed — avoids unnecessary SSE reconstruction
+    if rehydrated == full_content {
+        return text;
+    }
+
+    // Reconstruct: first content chunk gets all rehydrated content;
+    // subsequent content chunks get delta.content removed.
+    for (i, &idx) in content_indices.iter().enumerate() {
+        if let Ok(mut val) = serde_json::from_str::<Value>(&content_jsons[i]) {
+            if i == 0 {
+                val["choices"][0]["delta"]["content"] = Value::String(rehydrated.clone());
+            } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
+                delta.remove("content");
+            }
+            let new_json = serde_json::to_string(&val).unwrap_or_else(|_| content_jsons[i].clone());
+            out_events[idx] = format!("data: {}", new_json);
+        }
+    }
+
+    out_events.join("\n\n")
+}
+
+/// When force_no_stream is enabled but the upstream returns SSE anyway,
+/// buffer all raw bytes into one chunk, then rehydrate in a single pass.
+/// This eliminates chunk-boundary rehydration issues at the cost of
+/// delivering the full response only after the upstream finishes.
+async fn handle_streaming_as_regular(
+    status: reqwest::StatusCode,
+    resp_headers: reqwest::header::HeaderMap,
+    response: reqwest::Response,
+    state: Arc<ProxyState>,
+    faker: Arc<Faker>,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    let content_encoding = header_content_encoding(&resp_headers);
+    let is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
+
+    let mut raw = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                state.stats.add_response(bytes.len() as u64);
+                raw.extend_from_slice(&bytes);
+            }
+            Err(e) => {
+                warn!("Stream chunk error in buffered fallback: {}", e);
+                break;
+            }
+        }
+    }
+
+    let body = if raw.is_empty() || state.config.dry_run {
+        raw
+    } else if is_compressed {
+        match decompress_body(&raw, &content_encoding) {
+                Ok(decoded) => {
+                        let text = String::from_utf8_lossy(&decoded);
+                        if has_anthropic_thinking_signature(&text) {
+                            debug!("skipping rehydration for signed thinking response (compressed)");
+                            raw
+                        } else {
+                            let rehydrated = rehydrate_sse_body(&text, &faker);
+                            match compress_body(rehydrated.as_bytes(), &content_encoding) {
+                                Ok(encoded) => encoded,
+                                Err(e) => {
+                                    warn!("failed to re-compress rehydrated response: {}", e);
+                                    raw
+                                }
+                            }
+                        }
+                    }
+            Err(e) => {
+                warn!("failed to decompress streaming response: {}", e);
+                raw
+            }
+        }
+    } else {
+        let text = String::from_utf8_lossy(&raw);
+        if has_anthropic_thinking_signature(&text) {
+            debug!("skipping rehydration for signed thinking response");
+            raw
+        } else {
+            rehydrate_sse_body(&text, &faker).into_bytes()
+        }
+    };
+
+    passthrough_response(status, resp_headers, body)
 }
 
 async fn handle_streaming_response(
@@ -1065,7 +1208,8 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_textual_content_type, should_skip_redaction_for_payload};
+    use super::{is_textual_content_type, rehydrate_sse_body, should_skip_redaction_for_payload, Faker};
+    use crate::redactor::PiiKind;
 
     #[test]
     fn non_text_data_url_is_skipped() {
@@ -1091,5 +1235,77 @@ mod tests {
         assert!(is_textual_content_type("text/plain"));
         assert!(!is_textual_content_type("application/pdf"));
         assert!(!is_textual_content_type("image/png"));
+    }
+
+    #[test]
+    fn force_no_stream_json_unchanged() {
+        // Regression guard: rehydration is a no-op on text with no fakes
+        let faker = Faker::new(None, None);
+        let clean = r#"{"stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+        assert_eq!(faker.rehydrate(clean), clean);
+    }
+
+    #[test]
+    fn full_body_rehydration_resolves_boundary_splits() {
+        // Regression guard: rehydration restores original PII from fakes
+        let faker = Faker::new(None, None);
+        let email = "user@example.com";
+        let fake = faker.fake(email, &PiiKind::Email);
+        let body = format!("data: {{\"text\": \"{}\"}}\n\ndata: [DONE]\n\n", fake);
+        let rehydrated = faker.rehydrate(&body);
+        assert_eq!(
+            rehydrated,
+            format!("data: {{\"text\": \"{}\"}}\n\ndata: [DONE]\n\n", email)
+        );
+    }
+
+    #[test]
+    fn rehydrate_sse_body_reassembles_split_ip() {
+        // Simulate SSE response where a fake IP is split across delta.content fields.
+        // fake_ip(1) produces 47.53.71.98, which collides with the original 47.53.71.98.
+        // Use a different original so the first call gets counter=1 → fake = "47.53.71.98".
+        let faker = Faker::new(None, None);
+        let original_ip = "10.0.0.1";
+        let fake_ip_str = faker.fake(original_ip, &PiiKind::IpAddress);
+        assert_eq!(fake_ip_str, "47.53.71.98");
+
+        // SSE body: IP split across 4 content chunks, interspersed with role + finish
+        let sse_body = format!(
+            "data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"My IP is \"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"47\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\".53\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\".71\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\".98\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n"
+        );
+
+        let result = rehydrate_sse_body(&sse_body, &faker);
+
+        // The fake IP "47.53.71.98" should be replaced with original IP "10.0.0.1"
+        // in the first content chunk, and subsequent content chunks should have
+        // their delta.content fields removed.
+        assert!(
+            result.contains("10.0.0.1"),
+            "rehydrated body should contain the original IP\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("47.53.71.98"),
+            "rehydrated body should NOT contain the fake IP\nGot: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn rehydrate_sse_body_preserves_unchanged() {
+        // When no PII is in the response, rehydrate_sse_body is a no-op
+        let faker = Faker::new(None, None);
+        let body = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
+                    data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n\
+                    data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                    data: [DONE]\n\n";
+        assert_eq!(rehydrate_sse_body(body, &faker), body);
     }
 }
