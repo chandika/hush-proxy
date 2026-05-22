@@ -15,8 +15,9 @@ pub struct Faker {
 }
 
 struct FakerMaps {
-    forward: HashMap<String, String>,  // original -> fake
-    reverse: HashMap<String, String>,  // fake -> original
+    forward: HashMap<String, String>,        // original -> fake
+    reverse: HashMap<String, String>,        // fake -> original
+    custom_reverse: HashMap<String, String>, // substitute -> original (no length restriction)
     counter: usize,
 }
 
@@ -25,11 +26,16 @@ impl FakerMaps {
         FakerMaps {
             forward: HashMap::new(),
             reverse: HashMap::new(),
+            custom_reverse: HashMap::new(),
             counter: 0,
         }
     }
 
-    fn get_or_insert(&mut self, original: &str, generator: impl Fn(usize, &str) -> String) -> String {
+    fn get_or_insert(
+        &mut self,
+        original: &str,
+        generator: impl Fn(usize, &str) -> String,
+    ) -> String {
         if let Some(fake) = self.forward.get(original) {
             return fake.clone();
         }
@@ -62,9 +68,18 @@ impl FakerMaps {
                 result = result.replace(fake, original);
             }
         }
+
+        // Apply custom pattern mappings (no minimum-length restriction)
+        for (fake, original) in &self.custom_reverse {
+            if fake.chars().all(is_token_char) {
+                result = replace_token_bounded(&result, fake, original);
+            } else {
+                result = result.replace(fake, original);
+            }
+        }
+
         result
     }
-
 }
 
 fn should_allow_rehydrate_mapping(fake: &str) -> bool {
@@ -105,21 +120,28 @@ fn replace_token_bounded(input: &str, needle: &str, replacement: &str) -> String
 }
 
 static FAKE_DOMAINS: &[&str] = &[
-    "mailbox.org", "proton.me", "fastmail.com", "outlook.com",
-    "yahoo.com", "icloud.com", "gmail.com", "hotmail.com",
-    "zoho.com", "aol.com", "mail.com", "yandex.com",
+    "mailbox.org",
+    "proton.me",
+    "fastmail.com",
+    "outlook.com",
+    "yahoo.com",
+    "icloud.com",
+    "gmail.com",
+    "hotmail.com",
+    "zoho.com",
+    "aol.com",
+    "mail.com",
+    "yandex.com",
 ];
 
 static FAKE_NAMES: &[&str] = &[
-    "alex", "jordan", "taylor", "morgan", "casey", "riley",
-    "avery", "quinn", "blake", "drew", "jamie", "robin",
-    "sam", "pat", "chris", "lee", "kim", "dana", "jess", "max",
+    "alex", "jordan", "taylor", "morgan", "casey", "riley", "avery", "quinn", "blake", "drew",
+    "jamie", "robin", "sam", "pat", "chris", "lee", "kim", "dana", "jess", "max",
 ];
 
 static FAKE_SURNAMES: &[&str] = &[
-    "miller", "wilson", "moore", "taylor", "anderson", "thomas",
-    "jackson", "white", "harris", "martin", "garcia", "clark",
-    "lewis", "walker", "hall", "young", "king", "wright",
+    "miller", "wilson", "moore", "taylor", "anderson", "thomas", "jackson", "white", "harris",
+    "martin", "garcia", "clark", "lewis", "walker", "hall", "young", "king", "wright",
 ];
 
 impl Faker {
@@ -160,21 +182,19 @@ impl Faker {
         }
 
         let mut maps = self.maps.lock().unwrap();
-        let fake = maps.get_or_insert(original, |n, orig| {
-            match kind {
-                PiiKind::Email => fake_email(n, orig),
-                PiiKind::Phone => fake_phone(n, orig),
-                PiiKind::CreditCard => fake_credit_card(n, orig),
-                PiiKind::Ssn => fake_ssn(n),
-                PiiKind::IpAddress => fake_ip(n),
-                PiiKind::AwsKey => fake_aws_key(n),
-                PiiKind::GithubToken => fake_prefixed_token(n, orig),
-                PiiKind::GenericApiKey => fake_prefixed_token(n, orig),
-                PiiKind::BearerToken => fake_bearer(n, orig),
-                PiiKind::ConnectionString => fake_connection_string(n, orig),
-                PiiKind::PrivateKey => fake_private_key(orig),
-                PiiKind::HighEntropy => fake_high_entropy(n, orig),
-            }
+        let fake = maps.get_or_insert(original, |n, orig| match kind {
+            PiiKind::Email => fake_email(n, orig),
+            PiiKind::Phone => fake_phone(n, orig),
+            PiiKind::CreditCard => fake_credit_card(n, orig),
+            PiiKind::Ssn => fake_ssn(n),
+            PiiKind::IpAddress => fake_ip(n),
+            PiiKind::AwsKey => fake_aws_key(n),
+            PiiKind::GithubToken => fake_prefixed_token(n, orig),
+            PiiKind::GenericApiKey => fake_prefixed_token(n, orig),
+            PiiKind::BearerToken => fake_bearer(n, orig),
+            PiiKind::ConnectionString => fake_connection_string(n, orig),
+            PiiKind::PrivateKey => fake_private_key(orig),
+            PiiKind::HighEntropy => fake_high_entropy(n, orig),
         });
 
         if matches!(kind, PiiKind::ConnectionString) {
@@ -193,6 +213,17 @@ impl Faker {
     /// Rehydrate: restore fakes back to originals
     pub fn rehydrate(&self, text: &str) -> String {
         self.maps.lock().unwrap().rehydrate(text)
+    }
+
+    /// Register a user-defined pattern substitution.
+    /// These mappings bypass the minimum-length rehydration guard
+    /// since the user explicitly chose the substitute string.
+    pub fn add_custom_mapping(&self, original: &str, substitute: &str) {
+        let mut maps = self.maps.lock().unwrap();
+        maps.forward
+            .insert(original.to_string(), substitute.to_string());
+        maps.custom_reverse
+            .insert(substitute.to_string(), original.to_string());
     }
 
     /// Look up the original value for a fake (used by `mirage why <decoy>`).
@@ -255,7 +286,11 @@ fn fake_phone(n: usize, original: &str) -> String {
 
     // Preserve the format of the original
     if original.starts_with('+') {
-        let country = if original.starts_with("+1") { "+1" } else { "+1" };
+        let country = if original.starts_with("+1") {
+            "+1"
+        } else {
+            "+1"
+        };
         if original.contains('(') {
             format!("{} ({}) {}-{}", country, area, mid, last)
         } else if original.contains('-') {
@@ -285,9 +320,21 @@ fn fake_credit_card(n: usize, original: &str) -> String {
 
     // Preserve separator format
     if original.contains('-') {
-        format!("{}-{}-{}-{}", &digits[0..4], &digits[4..8], &digits[8..12], &digits[12..16])
+        format!(
+            "{}-{}-{}-{}",
+            &digits[0..4],
+            &digits[4..8],
+            &digits[8..12],
+            &digits[12..16]
+        )
     } else if original.contains(' ') {
-        format!("{} {} {} {}", &digits[0..4], &digits[4..8], &digits[8..12], &digits[12..16])
+        format!(
+            "{} {} {} {}",
+            &digits[0..4],
+            &digits[4..8],
+            &digits[8..12],
+            &digits[12..16]
+        )
     } else {
         digits
     }
@@ -310,17 +357,21 @@ fn fake_ip(n: usize) -> String {
 
 fn fake_aws_key(n: usize) -> String {
     // AKIA + 16 uppercase alphanumeric
-    let suffix: String = (0..16).map(|i| {
-        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        CHARS[(n * 31 + i * 7) % CHARS.len()] as char
-    }).collect();
+    let suffix: String = (0..16)
+        .map(|i| {
+            const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            CHARS[(n * 31 + i * 7) % CHARS.len()] as char
+        })
+        .collect();
     format!("AKIA{}", suffix)
 }
 
 fn fake_prefixed_token(n: usize, original: &str) -> String {
     // Preserve prefix (ghp_, sk-, sk-proj-, xox, AIza, etc.)
-    let prefixes = ["sk-proj-", "sk-", "ghp_", "ghs_", "gho_", "ghu_", "ghr_",
-                     "xoxb-", "xoxp-", "xoxa-", "xoxo-", "xoxr-", "xoxs-", "AIza"];
+    let prefixes = [
+        "sk-proj-", "sk-", "ghp_", "ghs_", "gho_", "ghu_", "ghr_", "xoxb-", "xoxp-", "xoxa-",
+        "xoxo-", "xoxr-", "xoxs-", "AIza",
+    ];
 
     let mut prefix = "";
     for p in &prefixes {
@@ -337,7 +388,11 @@ fn fake_prefixed_token(n: usize, original: &str) -> String {
 
 fn fake_bearer(n: usize, original: &str) -> String {
     // "Bearer " + token
-    let token_part = if original.len() > 7 { &original[7..] } else { original };
+    let token_part = if original.len() > 7 {
+        &original[7..]
+    } else {
+        original
+    };
     let fake_token = fake_alnum_string(n, token_part.len());
     format!("Bearer {}", fake_token)
 }
@@ -412,15 +467,33 @@ fn parse_connection_parts(s: &str) -> Option<ConnParts> {
     };
 
     let db = path_part.and_then(|p| {
-        let first = p.split('?').next().unwrap_or(p).split('/').next().unwrap_or("");
-        if first.is_empty() { None } else { Some(first.to_string()) }
+        let first = p
+            .split('?')
+            .next()
+            .unwrap_or(p)
+            .split('/')
+            .next()
+            .unwrap_or("");
+        if first.is_empty() {
+            None
+        } else {
+            Some(first.to_string())
+        }
     });
 
-    Some(ConnParts { user, pass, host, db })
+    Some(ConnParts {
+        user,
+        pass,
+        host,
+        db,
+    })
 }
 
 fn add_connection_component_mappings(maps: &mut FakerMaps, original: &str, fake: &str) {
-    let (Some(orig), Some(fk)) = (parse_connection_parts(original), parse_connection_parts(fake)) else {
+    let (Some(orig), Some(fk)) = (
+        parse_connection_parts(original),
+        parse_connection_parts(fake),
+    ) else {
         return;
     };
 
@@ -445,20 +518,30 @@ fn add_connection_component_mappings(maps: &mut FakerMaps, original: &str, fake:
 fn fake_private_key(original: &str) -> String {
     // Preserve BEGIN/END markers, fake the content with matching length
     let header = if original.contains("RSA") {
-        ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----")
+        (
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----END RSA PRIVATE KEY-----",
+        )
     } else if original.contains("EC") {
-        ("-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----")
+        (
+            "-----BEGIN EC PRIVATE KEY-----",
+            "-----END EC PRIVATE KEY-----",
+        )
     } else {
         ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----")
     };
 
     // Count content length between markers
-    let content_len = original.len().saturating_sub(header.0.len() + header.1.len() + 2);
+    let content_len = original
+        .len()
+        .saturating_sub(header.0.len() + header.1.len() + 2);
     let fake_content: String = (0..content_len)
         .map(|i| {
-            if i % 65 == 64 { '\n' }
-            else {
-                const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            if i % 65 == 64 {
+                '\n'
+            } else {
+                const B64: &[u8] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
                 B64[i % B64.len()] as char
             }
         })
@@ -472,14 +555,28 @@ fn fake_high_entropy(n: usize, original: &str) -> String {
     let has_upper = original.chars().any(|c| c.is_ascii_uppercase());
     let has_lower = original.chars().any(|c| c.is_ascii_lowercase());
     let has_digit = original.chars().any(|c| c.is_ascii_digit());
-    let has_special = original.contains('+') || original.contains('/') || original.contains('=') || original.contains('_') || original.contains('-');
+    let has_special = original.contains('+')
+        || original.contains('/')
+        || original.contains('=')
+        || original.contains('_')
+        || original.contains('-');
 
     let mut charset: Vec<u8> = Vec::new();
-    if has_lower { charset.extend_from_slice(b"abcdefghijklmnopqrstuvwxyz"); }
-    if has_upper { charset.extend_from_slice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"); }
-    if has_digit { charset.extend_from_slice(b"0123456789"); }
-    if has_special { charset.extend_from_slice(b"+/=_-"); }
-    if charset.is_empty() { charset.extend_from_slice(b"abcdefghijklmnopqrstuvwxyz0123456789"); }
+    if has_lower {
+        charset.extend_from_slice(b"abcdefghijklmnopqrstuvwxyz");
+    }
+    if has_upper {
+        charset.extend_from_slice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    }
+    if has_digit {
+        charset.extend_from_slice(b"0123456789");
+    }
+    if has_special {
+        charset.extend_from_slice(b"+/=_-");
+    }
+    if charset.is_empty() {
+        charset.extend_from_slice(b"abcdefghijklmnopqrstuvwxyz0123456789");
+    }
 
     (0..original.len())
         .map(|i| seeded_char(n * 31 + i * 7, &charset))
@@ -594,8 +691,12 @@ mod tests {
     #[test]
     fn test_rehydrate_does_not_replace_inside_identifiers() {
         let mut maps = FakerMaps::new();
-        maps.reverse.insert("at".to_string(), "pscale_api_real".to_string());
-        maps.reverse.insert("pscale_api_fake.abc123".to_string(), "pscale_api_real.abc123".to_string());
+        maps.reverse
+            .insert("at".to_string(), "pscale_api_real".to_string());
+        maps.reverse.insert(
+            "pscale_api_fake.abc123".to_string(),
+            "pscale_api_real.abc123".to_string(),
+        );
 
         let input = "pattern file_path pscale_api_fake.abc123";
         let out = maps.rehydrate(input);
@@ -607,4 +708,61 @@ mod tests {
         assert!(out.contains("pscale_api_real.abc123"));
     }
 
+    #[test]
+    fn test_custom_pattern_substitutes_and_rehydrates() {
+        let faker = Faker::new(None, None);
+        let original = "nathan";
+        let substitute = "john";
+
+        faker.add_custom_mapping(original, substitute);
+        let request_body = "My name is nathan and I work here";
+        let substituted = request_body.replace(original, substitute);
+        assert_eq!(substituted, "My name is john and I work here");
+
+        let response_body = "Hello john, welcome back";
+        let rehydrated = faker.rehydrate(response_body);
+        assert_eq!(rehydrated, "Hello nathan, welcome back");
+    }
+
+    #[test]
+    fn test_multiple_custom_patterns() {
+        let faker = Faker::new(None, None);
+
+        faker.add_custom_mapping("nathan", "john");
+        faker.add_custom_mapping("343-324", "000-000");
+
+        let text = "User nathan has id 343-324";
+        let substituted = text.replace("nathan", "john").replace("343-324", "000-000");
+        assert_eq!(substituted, "User john has id 000-000");
+
+        let response = "User john has id 000-000";
+        let rehydrated = faker.rehydrate(response);
+        assert_eq!(rehydrated, "User nathan has id 343-324");
+    }
+
+    #[test]
+    fn test_custom_pattern_short_substitute_rehydrates() {
+        let faker = Faker::new(None, None);
+
+        faker.add_custom_mapping("secret", "key");
+
+        let request = "The secret is safe";
+        let substituted = request.replace("secret", "key");
+        assert_eq!(substituted, "The key is safe");
+
+        let response = "The key is safe";
+        let rehydrated = faker.rehydrate(response);
+        assert_eq!(rehydrated, "The secret is safe");
+    }
+
+    #[test]
+    fn test_no_custom_match_passes_through() {
+        let faker = Faker::new(None, None);
+
+        faker.add_custom_mapping("something", "else");
+
+        let text = "This text has no matches";
+        let rehydrated = faker.rehydrate(text);
+        assert_eq!(rehydrated, text);
+    }
 }

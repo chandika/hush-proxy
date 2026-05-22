@@ -2,6 +2,14 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CustomPatternConfig {
+    pub name: String,
+    #[serde(default)]
+    pub pattern: String,
+    pub substitute: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default = "default_bind")]
     pub bind: String,
@@ -22,6 +30,8 @@ pub struct Config {
     pub blocklist: Vec<String>,
     #[serde(default)]
     pub bypass: Vec<String>,
+    #[serde(default)]
+    pub custom_patterns: Vec<CustomPatternConfig>,
     #[serde(default)]
     pub audit: AuditConfig,
     #[serde(default)]
@@ -182,6 +192,7 @@ impl Config {
             allowlist: vec![],
             blocklist: vec![],
             bypass: vec![],
+            custom_patterns: vec![],
             audit: AuditConfig::default(),
             dry_run: false,
             update_check: UpdateCheckConfig::default(),

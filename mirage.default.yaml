@@ -51,6 +51,19 @@ allowlist: []
 blocklist: []
   # - "*@personal.com"
 
+# Custom pattern definitions
+# Define regex patterns to detect and substitute with replacement strings.
+# Mappings are stored in the session faker for response rehydration.
+# Example:
+# custom_patterns:
+#   - name: "MY_NAME"
+#     pattern: "\\bnathan\\b"
+#     substitute: "john"
+#   - name: "WORK_ID"
+#     pattern: "\\b343-324\\b"
+#     substitute: "000-000"
+custom_patterns: []
+
 # Audit log
 audit:
   enabled: true
