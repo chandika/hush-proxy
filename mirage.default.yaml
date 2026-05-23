@@ -51,6 +51,33 @@ allowlist: []
 blocklist: []
   # - "*@personal.com"
 
+# Custom upstream API providers (OpenAI-compatible)
+# Define additional path prefix → upstream URL mappings.
+# Custom providers are checked before built-in providers.
+# Example:
+# custom_providers:
+#   - prefix: "/nanogpt"
+#     upstream: "https://nano-gpt.com/api/v1"
+#   - prefix: "/my-company"
+#     upstream: "https://gateway.mycompany.com/llm/v1"
+#
+# Then set your tool's base URL to http://127.0.0.1:8686/{prefix}
+# e.g., export OPENAI_BASE_URL=http://127.0.0.1:8686/nanogpt
+custom_providers: []
+
+# Custom pattern definitions
+# Define regex patterns to detect and substitute with replacement strings.
+# Mappings are stored in the session faker for response rehydration.
+# Example:
+# custom_patterns:
+#   - name: "MY_NAME"
+#     pattern: "\\bnathan\\b"
+#     substitute: "john"
+#   - name: "WORK_ID"
+#     pattern: "\\b343-324\\b"
+#     substitute: "000-000"
+custom_patterns: []
+
 # Audit log
 audit:
   enabled: true
@@ -60,6 +87,10 @@ audit:
 
 # Dry run: log what would be redacted without actually redacting
 dry_run: false
+
+# Buffer streaming responses: collect all SSE chunks before rehydrating
+# Eliminates chunk-boundary rehydration issues; increases first-token latency
+force_no_stream: false
 
 # Check GitHub releases for newer mirage-proxy versions at startup
 update_check:

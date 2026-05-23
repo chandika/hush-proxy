@@ -2,6 +2,20 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CustomProvider {
+    pub prefix: String,
+    pub upstream: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomPatternConfig {
+    pub name: String,
+    #[serde(default)]
+    pub pattern: String,
+    pub substitute: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default = "default_bind")]
     pub bind: String,
@@ -23,9 +37,15 @@ pub struct Config {
     #[serde(default)]
     pub bypass: Vec<String>,
     #[serde(default)]
+    pub custom_providers: Vec<CustomProvider>,
+    #[serde(default)]
+    pub custom_patterns: Vec<CustomPatternConfig>,
+    #[serde(default)]
     pub audit: AuditConfig,
     #[serde(default)]
     pub dry_run: bool,
+    #[serde(default)]
+    pub force_no_stream: bool,
     #[serde(default)]
     pub update_check: UpdateCheckConfig,
 }
@@ -182,8 +202,11 @@ impl Config {
             allowlist: vec![],
             blocklist: vec![],
             bypass: vec![],
+            custom_providers: vec![],
+            custom_patterns: vec![],
             audit: AuditConfig::default(),
             dry_run: false,
+            force_no_stream: false,
             update_check: UpdateCheckConfig::default(),
         }
     }

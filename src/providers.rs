@@ -1,6 +1,8 @@
-/// Built-in provider routing.
-/// Maps path prefixes to upstream API base URLs.
-/// When no --target is specified, mirage acts as a multi-provider proxy.
+//! Built-in provider routing.
+//! Maps path prefixes to upstream API base URLs.
+//! When no --target is specified, mirage acts as a multi-provider proxy.
+
+use crate::config::CustomProvider;
 
 pub struct Provider {
     pub name: &'static str,
@@ -50,6 +52,30 @@ pub static PROVIDERS: &[Provider] = &[
     Provider { name: "xAI / Grok",     prefix: "/xai",          upstream: "https://api.x.ai" },
 ];
 
+/// Strip a prefix from a path and normalize the remaining portion.
+/// Ensures the result always starts with '/'.
+fn strip_prefix(path: &str, prefix: &str) -> String {
+    let remaining = &path[prefix.len()..];
+    if remaining.is_empty() {
+        "/".to_string()
+    } else if remaining.starts_with('/') {
+        remaining.to_string()
+    } else {
+        format!("/{remaining}")
+    }
+}
+
+/// Resolve a custom provider prefix match, returning (upstream, remaining_path).
+fn resolve_custom_provider<'a>(path: &str, custom_providers: &'a [CustomProvider]) -> Option<(&'a str, String)> {
+    for cp in custom_providers {
+        if path.starts_with(&cp.prefix) {
+            let remaining = strip_prefix(path, &cp.prefix);
+            return Some((&cp.upstream, remaining));
+        }
+    }
+    None
+}
+
 /// Resolve a request path to (upstream_base_url, remaining_path).
 /// If a provider prefix matches, strip it and return the upstream.
 /// Falls back to auto-detection for common API paths.
@@ -58,13 +84,21 @@ pub static PROVIDERS: &[Provider] = &[
 /// `is_chatgpt_account`: true if the request has a `chatgpt-account-id` header,
 /// indicating it uses ChatGPT account auth (e.g. Codex CLI with ChatGPT Plus).
 /// These requests go to chatgpt.com/backend-api/codex/* instead of api.openai.com.
-pub fn resolve_provider(path: &str, is_chatgpt_account: bool) -> Option<(&'static str, String)> {
+pub fn resolve_provider<'a>(
+    path: &str,
+    is_chatgpt_account: bool,
+    custom_providers: &'a [CustomProvider],
+) -> Option<(&'a str, String)> {
+    // Custom providers checked first — allows overriding built-in entries
+    if let Some(result) = resolve_custom_provider(path, custom_providers) {
+        return Some(result);
+    }
+
     // Explicit prefix match
     for p in PROVIDERS {
         if path.starts_with(p.prefix) {
-            let remaining = &path[p.prefix.len()..];
-            let remaining = if remaining.is_empty() { "/" } else { remaining };
-            return Some((p.upstream, remaining.to_string()));
+            let remaining = strip_prefix(path, p.prefix);
+            return Some((p.upstream, remaining));
         }
     }
 
@@ -102,4 +136,84 @@ pub fn resolve_provider(path: &str, is_chatgpt_account: bool) -> Option<(&'stati
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CustomProvider;
+
+    #[test]
+    fn custom_provider_resolves_before_builtin() {
+        let custom = vec![CustomProvider {
+            prefix: "/openai".to_string(),
+            upstream: "https://custom-openai.example.com".to_string(),
+        }];
+        let result = resolve_provider("/openai/v1/chat/completions", false, &custom);
+        assert!(result.is_some());
+        let (upstream, remaining) = result.unwrap();
+        assert_eq!(upstream, "https://custom-openai.example.com");
+        assert_eq!(remaining, "/v1/chat/completions");
+    }
+
+    #[test]
+    fn custom_provider_returns_correct_upstream() {
+        let custom = vec![CustomProvider {
+            prefix: "/nanogpt".to_string(),
+            upstream: "https://nano-gpt.com/api/v1".to_string(),
+        }];
+        let result = resolve_provider("/nanogpt/chat/completions", false, &custom);
+        assert!(result.is_some());
+        let (upstream, remaining) = result.unwrap();
+        assert_eq!(upstream, "https://nano-gpt.com/api/v1");
+        assert_eq!(remaining, "/chat/completions");
+    }
+
+    #[test]
+    fn empty_custom_providers_falls_through_to_builtin() {
+        let custom: Vec<CustomProvider> = vec![];
+        let result = resolve_provider("/openai/v1/chat/completions", false, &custom);
+        assert!(result.is_some());
+        let (upstream, remaining) = result.unwrap();
+        assert_eq!(upstream, "https://api.openai.com");
+        assert_eq!(remaining, "/v1/chat/completions");
+    }
+
+    #[test]
+    fn custom_provider_no_match_falls_through() {
+        let custom = vec![CustomProvider {
+            prefix: "/nanogpt".to_string(),
+            upstream: "https://nano-gpt.com/api/v1".to_string(),
+        }];
+        let result = resolve_provider("/anthropic/v1/messages", false, &custom);
+        assert!(result.is_some());
+        let (upstream, _) = result.unwrap();
+        assert_eq!(upstream, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn custom_provider_path_with_prefix_overlap() {
+        let custom = vec![CustomProvider {
+            prefix: "/nanogpt/v1".to_string(),
+            upstream: "https://nano-gpt.com/api/v1".to_string(),
+        }];
+        let result = resolve_provider("/nanogpt/v1/chat/completions", false, &custom);
+        assert!(result.is_some());
+        let (upstream, remaining) = result.unwrap();
+        assert_eq!(upstream, "https://nano-gpt.com/api/v1");
+        assert_eq!(remaining, "/chat/completions");
+    }
+
+    #[test]
+    fn custom_provider_prefix_root_only() {
+        let custom = vec![CustomProvider {
+            prefix: "/".to_string(),
+            upstream: "https://catch-all.example.com".to_string(),
+        }];
+        let result = resolve_provider("/any/path", false, &custom);
+        assert!(result.is_some());
+        let (upstream, remaining) = result.unwrap();
+        assert_eq!(upstream, "https://catch-all.example.com");
+        assert_eq!(remaining, "/any/path");
+    }
 }
